@@ -83,14 +83,21 @@ class VortexMAE(nn.Module):
         # Stage 3 -> 2
         z = outs[3].permute(0, 4, 1, 2, 3) # B, C, D, H, W
         z = self.up_stage3(z)
-        z = z + outs[2].permute(0, 4, 1, 2, 3) # Simple skip add (or concat if paper specifies)
+        # Handle shape mismatch if encoder padded odd dimensions
+        sh2 = outs[2].shape
+        z = z[:, :, :sh2[1], :sh2[2], :sh2[3]] 
+        z = z + outs[2].permute(0, 4, 1, 2, 3)
         
         # Stage 2 -> 1
         z = self.up_stage2(z)
+        sh1 = outs[1].shape
+        z = z[:, :, :sh1[1], :sh1[2], :sh1[3]]
         z = z + outs[1].permute(0, 4, 1, 2, 3)
         
         # Stage 1 -> 0
         z = self.up_stage1(z)
+        sh0 = outs[0].shape
+        z = z[:, :, :sh0[1], :sh0[2], :sh0[3]]
         z = z + outs[0].permute(0, 4, 1, 2, 3)
         
         # Final Reconstruction
