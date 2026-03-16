@@ -9,41 +9,40 @@ from tqdm import tqdm
 
 from dataset import VortexMAEDataset
 from model import VortexMAE
+from vortex_utils import calculate_ivd
 
 def main():
-    parser = argparse.ArgumentParser(description="VortexMAE Inference/Visualization Script")
+    parser = argparse.ArgumentParser(description="VortexMAE Inference/Visualization Script (Vortex Mask)")
     parser.add_argument("--data_dir", type=str, required=True, help="Directory containing .vti files")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pth checkpoint")
-    parser.add_argument("--save_dir", type=str, default="./inference_results", help="Where to save results")
-    parser.add_argument("--mask_ratio", type=float, default=0.75, help="Mask ratio for visualization")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to fine-tuned .pth checkpoint")
+    parser.add_argument("--save_dir", type=str, default="./vortex_results", help="Where to save results")
     parser.add_argument("--num_samples", type=int, default=10, help="Number of test samples to visualize")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Binary threshold for vortex mask")
     
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 1. Load Test Dataset (7:3 split consistency)
+    # 1. Load Test Dataset
     test_dataset = VortexMAEDataset(args.data_dir, split="test", split_ratio=0.7)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
     
     in_chans, D, H, W = test_dataset[0].shape
     
-    # 2. Load Model
+    # 2. Load Fine-tuned Model
     model = VortexMAE(
         in_chans=in_chans,
-        mask_ratio=args.mask_ratio,
-        embed_dim=48,
-        depths=[2, 2, 6, 2],
-        num_heads=[3, 6, 12, 24]
+        out_chans=1,
+        mode='segmentation'
     ).to(device)
     
-    print(f"Loading checkpoint from {args.checkpoint}...")
+    print(f"Loading fine-tuned checkpoint from {args.checkpoint}...")
     checkpoint = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
     # 3. Running Inference
-    print(f"Generating reconstructions for the first {args.num_samples} test samples...")
+    print(f"Generating vortex identification masks for {args.num_samples} samples...")
     
     counter = 0
     with torch.no_grad():
@@ -52,47 +51,33 @@ def main():
                 break
                 
             batch = batch.to(device)
-            # Forward pass
-            x_rec, mask = model(batch)
+            # Pred output is sigmoid probability
+            pred_prob = model(batch)
             
-            # Extract single sample
-            pred = x_rec[0].cpu().numpy()
-            gt = batch[0].cpu().numpy()
-            m = mask[0].cpu().numpy() # (1, D, H, W)
+            # Extract GT IVD on the fly
+            gt_ivd = calculate_ivd(batch)
+            gt_mask = (gt_ivd > 0).float()
             
-            # Un-normalize if possible
-            try:
-                mean = test_dataset.mean.squeeze()
-                std = test_dataset.std.squeeze()
-                for c in range(in_chans):
-                    pred[c] = pred[c] * std[c] + mean[c]
-                    gt[c] = gt[c] * std[c] + mean[c]
-            except:
-                pass
+            # Prepare data for VTI
+            p_mask = pred_prob[0, 0].cpu().numpy()
+            g_mask = gt_mask[0].cpu().numpy()
+            b_mask = (p_mask > args.threshold).astype(np.float32)
             
             # Save to VTI
-            vis_mesh = pv.ImageData()
-            vis_mesh.dimensions = (W, H, D)
+            mesh = pv.ImageData()
+            mesh.dimensions = (W, H, D)
             
-            # Save Reconstructed vs Ground Truth for each component
-            for i, name in enumerate(["u", "v", "w"]):
-                vis_mesh.point_data[f"{name}_reconstructed"] = pred[i].flatten(order='C')
-                vis_mesh.point_data[f"{name}_ground_truth"] = gt[i].flatten(order='C')
+            mesh.point_data["GT_IVD_Mask"] = g_mask.flatten(order='C')
+            mesh.point_data["Pred_Prob_Map"] = p_mask.flatten(order='C')
+            mesh.point_data["Binary_Selection"] = b_mask.flatten(order='C')
             
-            # Also save the binary mask so we know what was hidden
-            vis_mesh.point_data["mask"] = m[0].flatten(order='C')
-            
-            # We can also compute error
-            error = np.sqrt(np.sum((pred - gt)**2, axis=0))
-            vis_mesh.point_data["reconstruction_error"] = error.flatten(order='C')
-            
-            out_path = os.path.join(args.save_dir, f"test_sample_{counter:03d}.vti")
-            vis_mesh.save(out_path)
+            out_path = os.path.join(args.save_dir, f"vortex_id_{counter:03d}.vti")
+            mesh.save(out_path)
             
             counter += 1
 
-    print(f"\nInference complete. Results saved in {args.save_dir}")
-    print("You can open these files in ParaView to compare the fields.")
+    print(f"\nInference complete. Visual comparison VTIs saved in {args.save_dir}")
+    print("Use ParaView to visualize GT_IVD_Mask vs Binary_Selection.")
 
 if __name__ == "__main__":
     main()
