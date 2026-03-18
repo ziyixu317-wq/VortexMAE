@@ -24,7 +24,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 1. Load Test Dataset
-    test_dataset = VortexMAEDataset(args.data_dir, split="test", split_ratio=0.7)
+    test_dataset = VortexMAEDataset(args.data_dir, split="inference")
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
     
     in_chans, D, H, W = test_dataset[0].shape

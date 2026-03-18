@@ -25,9 +25,8 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 1. Dataset & Loader (Finetuning on 5% of data as per paper for some cases)
-    # Using a subset if needed, here we use the full training split
-    train_dataset = VortexMAEDataset(args.data_dir, split="train", split_ratio=0.7)
+    # 1. Dataset & Loader
+    train_dataset = VortexMAEDataset(args.data_dir, split="finetune_train")
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     
     in_chans, D, H, W = train_dataset[0].shape

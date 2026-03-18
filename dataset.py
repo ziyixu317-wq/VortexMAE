@@ -53,11 +53,30 @@ class VortexMAEDataset(Dataset):
             raise FileNotFoundError(f"No .vti files found in {data_dir}")
             
         num_total = len(self.all_files)
-        num_train = int(num_total * split_ratio)
         
-        if split == "train":
+        if split == "pretrain_train":
+            # 30% for pre-training training
+            self.files = self.all_files[:int(num_total * 0.3)]
+        elif split == "pretrain_eval":
+            # 5% for pre-training evaluation
+            start = int(num_total * 0.3)
+            end = int(num_total * 0.35)
+            self.files = self.all_files[start:end]
+        elif split == "finetune_train":
+            # 5% for fine-tuning training
+            start = int(num_total * 0.35)
+            end = int(num_total * 0.4)
+            self.files = self.all_files[start:end]
+        elif split == "inference":
+            # 30% for inference
+            start = int(num_total * 0.4)
+            end = int(num_total * 0.7)
+            self.files = self.all_files[start:end]
+        elif split == "train":
+            num_train = int(num_total * split_ratio)
             self.files = self.all_files[:num_train]
         else:
+            num_train = int(num_total * split_ratio)
             self.files = self.all_files[num_train:]
             
         print(f"[{split}] Loading {len(self.files)} files from {data_dir}...")

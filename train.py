@@ -25,9 +25,9 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 1. Datasets & Loaders (7:3 split)
-    train_dataset = VortexMAEDataset(args.data_dir, split="train", split_ratio=0.7)
-    test_dataset = VortexMAEDataset(args.data_dir, split="test", split_ratio=0.7)
+    # 1. Datasets & Loaders
+    train_dataset = VortexMAEDataset(args.data_dir, split="pretrain_train")
+    test_dataset = VortexMAEDataset(args.data_dir, split="pretrain_eval")
     
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
