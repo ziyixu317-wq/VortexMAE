@@ -23,7 +23,18 @@ def main():
     
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Device detection: TPU (via torch_xla) > CUDA > CPU
+    use_tpu = False
+    try:
+        import torch_xla
+        import torch_xla.core.xla_model as xm
+        device = xm.xla_device()
+        use_tpu = True
+        print(f"Using device: TPU ({device})")
+    except ImportError:
+        xm = None
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device}")
     
     # 1. Dataset & Loader
     train_dataset = VortexMAEDataset(args.data_dir, split="finetune_train")
@@ -71,6 +82,8 @@ def main():
             loss = vortex_mae_finetune_loss(pred_prob, gt_mask)
             loss.backward()
             optimizer.step()
+            if use_tpu:
+                xm.mark_step()
             
             epoch_loss += loss.item()
             epoch_iou += calculate_iou(pred_prob, gt_mask).item()
