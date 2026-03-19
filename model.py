@@ -31,19 +31,35 @@ class VortexMAE(nn.Module):
         torch.nn.init.normal_(self.mask_token, std=.02)
         
         # 3. U-Net Expansive Path (Decoder)
+        # Use Upsample + Conv3d instead of ConvTranspose3d to avoid checkerboard artifacts
         d1 = embed_dim * 2
         d2 = embed_dim * 4
         d3 = embed_dim * 8
         
-        self.up_stage3 = nn.ConvTranspose3d(d3, d2, kernel_size=2, stride=2)
-        self.up_stage2 = nn.ConvTranspose3d(d2, d1, kernel_size=2, stride=2)
-        self.up_stage1 = nn.ConvTranspose3d(d1, embed_dim, kernel_size=2, stride=2)
+        self.up_stage3 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
+            nn.Conv3d(d3, d2, kernel_size=3, padding=1)
+        )
+        self.up_stage2 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
+            nn.Conv3d(d2, d1, kernel_size=3, padding=1)
+        )
+        self.up_stage1 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
+            nn.Conv3d(d1, embed_dim, kernel_size=3, padding=1)
+        )
         
         # Final reconstruction layer for pre-training (3-channel velocity)
-        self.up_final_rec = nn.ConvTranspose3d(embed_dim, in_chans, kernel_size=patch_size, stride=patch_size)
+        self.up_final_rec = nn.Sequential(
+            nn.Upsample(scale_factor=patch_size, mode='trilinear', align_corners=False),
+            nn.Conv3d(embed_dim, in_chans, kernel_size=3, padding=1)
+        )
         
         # Final segmentation head for fine-tuning (out_chans-channel mask, usually 1)
-        self.up_final_seg = nn.ConvTranspose3d(embed_dim, out_chans, kernel_size=patch_size, stride=patch_size)
+        self.up_final_seg = nn.Sequential(
+            nn.Upsample(scale_factor=patch_size, mode='trilinear', align_corners=False),
+            nn.Conv3d(embed_dim, out_chans, kernel_size=3, padding=1)
+        )
 
     def forward(self, x):
         """
@@ -97,11 +113,14 @@ class VortexMAE(nn.Module):
         # Final layer based on mode
         if self.mode == 'pretrain':
             out = self.up_final_rec(z)
+            # Crop to exact input size (Upsample may overshoot)
+            out = out[:, :, :D, :H, :W]
             mask_pixel = F.interpolate(mask.permute(0, 4, 1, 2, 3), 
                                        size=(D, H, W), mode='nearest')
             return out, mask_pixel
         else:
             out = self.up_final_seg(z)
+            out = out[:, :, :D, :H, :W]
             # Return sigmoid for probability map during segmentation
             return torch.sigmoid(out)
 
