@@ -60,18 +60,19 @@ class VortexMAEDataset(Dataset):
         num_total = len(self.all_files)
         
         if split == "pretrain_train":
-            self.files = self.all_files[:int(num_total * 0.3)]
+            end = max(int(num_total * 0.3), 1)
+            self.files = self.all_files[:end]
         elif split == "pretrain_eval":
-            start = int(num_total * 0.3)
-            end = int(num_total * 0.35)
+            start = max(int(num_total * 0.3), 1)
+            end = max(int(num_total * 0.35), start + 1)
             self.files = self.all_files[start:end]
         elif split == "finetune_train":
-            start = int(num_total * 0.35)
-            end = int(num_total * 0.4)
+            start = max(int(num_total * 0.35), 2)
+            end = max(int(num_total * 0.4), start + 1)
             self.files = self.all_files[start:end]
         elif split == "inference":
-            start = int(num_total * 0.4)
-            end = int(num_total * 0.7)
+            start = max(int(num_total * 0.4), 3)
+            end = max(int(num_total * 0.7), start + 1)
             self.files = self.all_files[start:end]
         elif split == "train":
             num_train = int(num_total * split_ratio)
