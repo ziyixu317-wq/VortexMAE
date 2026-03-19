@@ -103,7 +103,7 @@ def main():
             ckpt_path = os.path.join(args.save_dir, "vortexmae_best.pth")
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': {k: v.cpu() for k, v in model.state_dict().items()},
                 'loss': best_loss
             }, ckpt_path)
             print(f" -> Saved best checkpoint: {ckpt_path}")

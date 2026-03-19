@@ -47,13 +47,14 @@ def main():
         in_chans=in_chans,
         out_chans=1,
         mode='segmentation' # Switch to segmentation mode
-    ).to(device)
+    )
     
-    # Load pre-trained encoder weights
+    # Load pre-trained encoder weights (load to CPU first for TPU compatibility)
     print(f"Loading pre-trained weights from {args.pretrained_ckpt}...")
-    checkpoint = torch.load(args.pretrained_ckpt, map_location=device)
+    checkpoint = torch.load(args.pretrained_ckpt, map_location='cpu')
     # Filter state dict to only load encoder and shared decoder parts if possible
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    model = model.to(device)
     
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05, betas=(0.9, 0.99))
     scheduler = StepLR(optimizer, step_size=100, gamma=0.8)

@@ -45,11 +45,12 @@ def main():
         in_chans=in_chans,
         out_chans=1,
         mode='segmentation'
-    ).to(device)
+    )
     
     print(f"Loading fine-tuned checkpoint from {args.checkpoint}...")
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(args.checkpoint, map_location='cpu')
     model.load_state_dict(checkpoint['model_state_dict'])
+    model = model.to(device)
     model.eval()
     
     # 3. Running Inference
