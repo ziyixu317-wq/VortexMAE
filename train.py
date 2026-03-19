@@ -119,6 +119,9 @@ def main():
                 pred = x_rec[0].cpu().numpy()
                 gt = sample_batch[0].cpu().numpy()
                 
+                # Get actual spatial dimensions from the test sample
+                _, vD, vH, vW = pred.shape
+                
                 # Un-normalize (min-max -> original scale)
                 try:
                     ch_min = test_dataset.ch_min.squeeze()  # (3,)
@@ -132,7 +135,7 @@ def main():
                 # Save as VTI
                 # VTK uses (x, y, z)
                 vis_mesh = pv.ImageData()
-                vis_mesh.dimensions = (W, H, D)
+                vis_mesh.dimensions = (vW, vH, vD)
                 
                 # Components u,v,w
                 for i, name in enumerate(["u", "v", "w"]):
