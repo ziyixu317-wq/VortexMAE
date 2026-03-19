@@ -19,11 +19,9 @@ def read_vti_velocity(filepath, velocity_names=("u", "v", "w")):
             arr = mesh.cell_data[name]
         else:
             # Try searching for vectors if scalar names fail
-            # Paper might use 'velocity' array
             potential_vectors = [k for k in mesh.point_data.keys() if 'velocity' in k.lower()]
             if potential_vectors:
                 vec = mesh.point_data[potential_vectors[0]]
-                # If it's a 3-component vector
                 if len(vec.shape) == 2 and vec.shape[1] == 3:
                    u = vec[:, 0].reshape(dims[2], dims[1], dims[0])
                    v = vec[:, 1].reshape(dims[2], dims[1], dims[0])
@@ -41,11 +39,18 @@ def read_vti_velocity(filepath, velocity_names=("u", "v", "w")):
 class VortexMAEDataset(Dataset):
     """
     Dataset for loading a directory of .vti files.
-    Supports temporal sequence splits (7:3 ratio).
+    Paper-consistent implementation:
+      - Min-max normalization per channel (Eq. 2)
+      - 128^3 random crop during training (Section IV.A.2)
+      - Full grid for evaluation/inference
     """
-    def __init__(self, data_dir, split="train", split_ratio=0.7, normalize=True):
+    def __init__(self, data_dir, split="train", split_ratio=0.7, 
+                 normalize=True, crop_size=128):
         self.data_dir = data_dir
         self.normalize = normalize
+        self.crop_size = crop_size
+        # Enable random cropping only for training splits
+        self.do_crop = split in ("pretrain_train", "finetune_train", "train")
         
         # Collect and sort all .vti files
         self.all_files = sorted(glob.glob(os.path.join(data_dir, "*.vti")))
@@ -55,20 +60,16 @@ class VortexMAEDataset(Dataset):
         num_total = len(self.all_files)
         
         if split == "pretrain_train":
-            # 30% for pre-training training
             self.files = self.all_files[:int(num_total * 0.3)]
         elif split == "pretrain_eval":
-            # 5% for pre-training evaluation
             start = int(num_total * 0.3)
             end = int(num_total * 0.35)
             self.files = self.all_files[start:end]
         elif split == "finetune_train":
-            # 5% for fine-tuning training
             start = int(num_total * 0.35)
             end = int(num_total * 0.4)
             self.files = self.all_files[start:end]
         elif split == "inference":
-            # 30% for inference
             start = int(num_total * 0.4)
             end = int(num_total * 0.7)
             self.files = self.all_files[start:end]
@@ -81,26 +82,55 @@ class VortexMAEDataset(Dataset):
             
         print(f"[{split}] Loading {len(self.files)} files from {data_dir}...")
         
-        # Pre-load into memory for efficiency
+        # Pre-load raw data into memory
         self.data = []
         for f in self.files:
             self.data.append(read_vti_velocity(f))
         
-        self.data = np.stack(self.data, axis=0) # (N, 3, D, H, W)
+        self.data = np.stack(self.data, axis=0)  # (N, 3, D, H, W)
         
         if self.normalize:
-            # We use global statistics for normalization
-            # Note: In a real scenario, we'd use train stats for validation too
-            # For simplicity here, we normalize based on the provided split
-            self.mean = self.data.mean(axis=(0, 2, 3, 4), keepdims=True)
-            self.std = self.data.std(axis=(0, 2, 3, 4), keepdims=True) + 1e-8
-            self.data = (self.data - self.mean) / self.std
+            # Paper Eq. 2: Channel-wise min-max normalization
+            # v_hat_i = (v_i - min(v_i)) / (max(v_i) - min(v_i) + eps)
+            eps = 1e-8
+            # Compute per-channel min/max across all samples and spatial dims
+            # Shape: (1, 3, 1, 1, 1)
+            self.ch_min = self.data.min(axis=(0, 2, 3, 4), keepdims=True)
+            self.ch_max = self.data.max(axis=(0, 2, 3, 4), keepdims=True)
+            self.data = (self.data - self.ch_min) / (self.ch_max - self.ch_min + eps)
+        
+        _, _, D, H, W = self.data.shape
+        print(f"  Grid shape: D={D}, H={H}, W={W} | Crop={self.do_crop} (size={crop_size})")
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return torch.from_numpy(self.data[idx])
+        sample = self.data[idx]  # (3, D, H, W)
+        
+        if self.do_crop:
+            _, D, H, W = sample.shape
+            cs = self.crop_size
+            
+            # Clamp crop_size to actual dimension (handles grids < 128)
+            cd = min(cs, D)
+            ch = min(cs, H)
+            cw = min(cs, W)
+            
+            # Random start indices
+            d0 = np.random.randint(0, D - cd + 1) if D > cd else 0
+            h0 = np.random.randint(0, H - ch + 1) if H > ch else 0
+            w0 = np.random.randint(0, W - cw + 1) if W > cw else 0
+            
+            sample = sample[:, d0:d0+cd, h0:h0+ch, w0:w0+cw]
+            
+            # Pad to crop_size if any dim was smaller
+            if cd < cs or ch < cs or cw < cs:
+                padded = np.zeros((3, cs, cs, cs), dtype=np.float32)
+                padded[:, :cd, :ch, :cw] = sample
+                sample = padded
+        
+        return torch.from_numpy(sample.copy())
 
     @property
     def spatial_shape(self):

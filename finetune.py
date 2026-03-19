@@ -4,7 +4,7 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
 import numpy as np
 
@@ -55,8 +55,8 @@ def main():
     # Filter state dict to only load encoder and shared decoder parts if possible
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05, betas=(0.9, 0.99))
+    scheduler = StepLR(optimizer, step_size=100, gamma=0.8)
     
     # 3. Fine-tuning Loop
     best_iou = 0.0

@@ -4,7 +4,7 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
 import numpy as np
 import pyvista as pv
@@ -15,10 +15,10 @@ from model import VortexMAE, vortex_mae_pretrain_loss
 def main():
     parser = argparse.ArgumentParser(description="VortexMAE Pre-training Script (Paper Consistent)")
     parser.add_argument("--data_dir", type=str, required=True, help="Directory containing .vti files")
-    parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--mask_ratio", type=float, default=0.15, help="MAE masking ratio")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
+    parser.add_argument("--epochs", type=int, default=2000, help="Number of epochs")
+    parser.add_argument("--lr", type=float, default=4e-4, help="Learning rate")
+    parser.add_argument("--mask_ratio", type=float, default=0.25, help="MAE masking ratio")
     parser.add_argument("--save_dir", type=str, default="./checkpoints_vortexmae", help="Save directory")
     
     args = parser.parse_args()
@@ -52,13 +52,13 @@ def main():
     model = VortexMAE(
         in_chans=in_chans,
         mask_ratio=args.mask_ratio,
-        embed_dim=48, # Scale based on VRAM
-        depths=[2, 2, 6, 2],
+        embed_dim=48,
+        depths=[2, 2, 18, 2],
         num_heads=[3, 6, 12, 24]
     ).to(device)
     
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05, betas=(0.9, 0.99))
+    scheduler = StepLR(optimizer, step_size=100, gamma=0.8)
     
     # 3. Training Loop
     best_loss = float('inf')
@@ -119,13 +119,13 @@ def main():
                 pred = x_rec[0].cpu().numpy()
                 gt = sample_batch[0].cpu().numpy()
                 
-                # Un-normalize
+                # Un-normalize (min-max -> original scale)
                 try:
-                    mean = test_dataset.mean.squeeze() # (3,)
-                    std = test_dataset.std.squeeze()
+                    ch_min = test_dataset.ch_min.squeeze()  # (3,)
+                    ch_max = test_dataset.ch_max.squeeze()  # (3,)
                     for c in range(in_chans):
-                        pred[c] = pred[c] * std[c] + mean[c]
-                        gt[c] = gt[c] * std[c] + mean[c]
+                        pred[c] = pred[c] * (ch_max[c] - ch_min[c]) + ch_min[c]
+                        gt[c] = gt[c] * (ch_max[c] - ch_min[c]) + ch_min[c]
                 except:
                     pass
                 
