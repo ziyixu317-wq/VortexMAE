@@ -7,6 +7,12 @@ from torch.utils.data import DataLoader
 import numpy as np
 import pyvista as pv
 from tqdm import tqdm
+try:
+    from scipy.ndimage import label as ccl_label
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    print("Warning: scipy not found. 3D CCL post-processing will be skipped.")
 
 from dataset import VortexMAEDataset
 from model import VortexMAE
@@ -18,7 +24,8 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to fine-tuned .pth checkpoint")
     parser.add_argument("--save_dir", type=str, default="./vortex_results", help="Where to save results")
     parser.add_argument("--num_samples", type=int, default=10, help="Number of test samples to visualize")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Binary threshold for vortex mask")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Segmentation threshold")
+    parser.add_argument("--no_ccl", action="store_true", help="Disable 3D Connected Component Analysis")
     
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
@@ -113,16 +120,32 @@ def main():
                         full_logits[:, :, d_s:d_e, h_s:h_e, w_s:w_e] += logits
                         full_count[:, :, d_s:d_e, h_s:h_e, w_s:w_e] += 1
             
-            # Apply sigmoid to averaged logits to get probabilities
-            pred_prob = torch.sigmoid(full_logits / torch.clamp(full_count, min=1.0))
+            # Final prediction mask
+            full_prob = (full_logits / torch.clamp(full_count, min=1.0)).sigmoid()
+            pred_mask = (full_prob > args.threshold).float().cpu().numpy()
+            
+            # Post-processing: 3D Connected Component Analysis (Eq. 23)
+            if HAS_SCIPY and not args.no_ccl:
+                labeled_array, num_features = ccl_label(pred_mask[0])
+                if num_features > 0:
+                    # Logic: Retain components larger than a tiny noise threshold (e.g., 10 voxels)
+                    component_sizes = np.bincount(labeled_array.ravel())
+                    # The paper says "Largest connected vortex regions"
+                    # We'll keep components > 5% of max component size or a flat threshold
+                    min_size = max(10, int(0.01 * component_sizes[1:].max()))
+                    mask_ccl = np.zeros_like(pred_mask[0])
+                    for i in range(1, num_features + 1):
+                        if component_sizes[i] >= min_size:
+                            mask_ccl[labeled_array == i] = 1
+                    pred_mask[0] = mask_ccl
             
             # Extract GT IVD on the fly
             gt_ivd = calculate_ivd(batch)
-            gt_mask = (gt_ivd > 0).float()
+            gt_mask = (gt_ivd > 0).float().cpu().numpy()
             
-            # Prepare data for VTI
-            p_mask = pred_prob[0, 0].cpu().numpy()
-            g_mask = gt_mask[0].cpu().numpy()
+            # Prepare data for VTI (Squeeze batch/channel if needed)
+            p_mask = pred_mask[0, 0] if pred_mask.ndim == 5 else pred_mask[0]
+            g_mask = gt_mask[0]
             b_mask = (p_mask > args.threshold).astype(np.float32)
             
             # IMPORTANT: Remove padding artifacts (D=80 vs 128)

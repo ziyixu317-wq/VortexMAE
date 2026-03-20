@@ -84,20 +84,31 @@ def calculate_q_criterion(u_tensor, dx=1.0, dy=1.0, dz=1.0):
 
 def vortex_mae_finetune_loss(pred_logits, target_mask, pos_weight=1.5):
     """
-    Combined Loss for Vortex Segmentation: Weighted BCE + Dice Loss
-    pos_weight set to 1.5 to prevent over-saturation ('bricks').
+    Current implementation: Weighted BCE + Dice Loss.
+    Note: See vortex_mae_paper_loss for the exact Eq. 20-22 version.
     """
-    # 1. Weighted BCE with Logits
     weight = torch.tensor([pos_weight], device=pred_logits.device)
     bce = F.binary_cross_entropy_with_logits(pred_logits, target_mask, pos_weight=weight)
     
-    # 2. Dice Loss (Structural focus)
     pred_prob = torch.sigmoid(pred_logits)
     smooth = 1e-6
     intersection = (pred_prob * target_mask).sum()
     dice_loss = 1 - (2. * intersection + smooth) / (pred_prob.sum() + target_mask.sum() + smooth)
     
     return 0.5 * bce + 0.5 * dice_loss
+
+def vortex_mae_paper_loss(pred_logits, target_mask, alpha=1.0, beta=1.0):
+    """
+    Paper-Consistent Loss (Eq. 20-22): alpha * L_BCE + beta * L_L2 (MSE).
+    """
+    # L_BCE (Eq. 20)
+    bce = F.binary_cross_entropy_with_logits(pred_logits, target_mask)
+    
+    # L_L2 (Eq. 21) - Per-voxel L2 is equivalent to Mean Squared Error 
+    pred_prob = torch.sigmoid(pred_logits)
+    mse = F.mse_loss(pred_prob, target_mask)
+    
+    return alpha * bce + beta * mse
 
 def calculate_iou(pred_mask, gt_mask, threshold=0.5):
     """

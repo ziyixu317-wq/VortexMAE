@@ -10,7 +10,7 @@ import numpy as np
 
 from dataset import VortexMAEDataset
 from model import VortexMAE
-from vortex_utils import vortex_mae_finetune_loss, calculate_iou, calculate_ivd
+from vortex_utils import vortex_mae_finetune_loss, vortex_mae_paper_loss, calculate_iou, calculate_ivd
 
 def main():
     parser = argparse.ArgumentParser(description="VortexMAE Fine-tuning Script (Paper Consistent)")
@@ -78,7 +78,8 @@ def main():
             
             pred_logits = model(batch) # B, 1, D, H, W
             
-            loss = vortex_mae_finetune_loss(pred_logits, gt_mask)
+            # Calculate loss using Paper-Consistent BCE + MSE (alpha=1.0, beta=1.0)
+            loss = vortex_mae_paper_loss(pred_logits, gt_mask)
             loss.backward()
             optimizer.step()
             if use_tpu:
