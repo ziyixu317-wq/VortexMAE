@@ -78,15 +78,17 @@ def main():
                 # Normalize IVD to [0, 1] for BCE
                 gt_mask = (gt_ivd > 0).float().unsqueeze(1) # B, 1, D, H, W
             
-            pred_prob = model(batch) # B, 1, D, H, W
+            pred_logits = model(batch) # B, 1, D, H, W
             
-            loss = vortex_mae_finetune_loss(pred_prob, gt_mask)
+            loss = vortex_mae_finetune_loss(pred_logits, gt_mask)
             loss.backward()
             optimizer.step()
             if use_tpu:
                 xm.mark_step()
             
             epoch_loss += loss.item()
+            # Calculate IoU using probabilities
+            pred_prob = torch.sigmoid(pred_logits)
             epoch_iou += calculate_iou(pred_prob, gt_mask).item()
             
         avg_loss = epoch_loss / len(train_loader)

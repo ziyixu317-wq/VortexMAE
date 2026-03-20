@@ -61,13 +61,22 @@ def calculate_ivd(u_tensor, dx=1.0, dy=1.0, dz=1.0):
     
     return ivd
 
-def vortex_mae_finetune_loss(pred_prob, target_mask):
+def vortex_mae_finetune_loss(pred_logits, target_mask, pos_weight=10.0):
     """
-    Eq. (22) in paper: L = alpha * L_BCE + beta * L_L2
+    Combined Loss for Vortex Segmentation: Weighted BCE + Dice Loss
     """
-    bce = F.binary_cross_entropy(pred_prob, target_mask)
-    l2 = F.mse_loss(pred_prob, target_mask)
-    return 0.5 * bce + 0.5 * l2
+    # 1. Weighted BCE with Logits
+    # pos_weight helps with the extreme sparsity of vortex regions
+    weight = torch.tensor([pos_weight], device=pred_logits.device)
+    bce = F.binary_cross_entropy_with_logits(pred_logits, target_mask, pos_weight=weight)
+    
+    # 2. Dice Loss (ignores background dominance)
+    pred_prob = torch.sigmoid(pred_logits)
+    smooth = 1e-6
+    intersection = (pred_prob * target_mask).sum()
+    dice_loss = 1 - (2. * intersection + smooth) / (pred_prob.sum() + target_mask.sum() + smooth)
+    
+    return 0.5 * bce + 0.5 * dice_loss
 
 def calculate_iou(pred_mask, gt_mask, threshold=0.5):
     """

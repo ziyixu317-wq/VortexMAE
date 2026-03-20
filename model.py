@@ -121,8 +121,8 @@ class VortexMAE(nn.Module):
         else:
             out = self.up_final_seg(z)
             out = out[:, :, :D, :H, :W]
-            # Return sigmoid for probability map during segmentation
-            return torch.sigmoid(out)
+            # Return raw logits for more stable BCEWithLogitsLoss
+            return out
 
 def vortex_mae_pretrain_loss(pred, target, mask):
     """

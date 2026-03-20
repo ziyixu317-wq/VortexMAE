@@ -72,7 +72,7 @@ def main():
             batch = batch.to(device)
             
             # Predict using sliding window
-            full_pred = torch.zeros((1, 1, D, H, W), device=device)
+            full_logits = torch.zeros((1, 1, D, H, W), device=device)
             full_count = torch.zeros((1, 1, D, H, W), device=device)
             
             # Iterate over the grid
@@ -105,16 +105,16 @@ def main():
                         if pd > 0 or ph > 0 or pw > 0:
                             crop = F.pad(crop, (0, pw, 0, ph, 0, pd))
                         
-                        # Forward
-                        pred = model(crop) # (1, 1, 128, 128, 128)
+                        # Forward (Now returns logits for stability)
+                        logits = model(crop) 
                         
                         # Unpad and accumulate
-                        pred = pred[:, :, :d_e-d_s, :h_e-h_s, :w_e-w_s]
-                        full_pred[:, :, d_s:d_e, h_s:h_e, w_s:w_e] += pred
+                        logits = logits[:, :, :d_e-d_s, :h_e-h_s, :w_e-w_s]
+                        full_logits[:, :, d_s:d_e, h_s:h_e, w_s:w_e] += logits
                         full_count[:, :, d_s:d_e, h_s:h_e, w_s:w_e] += 1
             
-            # Result is average of overlapping windows
-            pred_prob = full_pred / torch.clamp(full_count, min=1.0)
+            # Apply sigmoid to averaged logits to get probabilities
+            pred_prob = torch.sigmoid(full_logits / torch.clamp(full_count, min=1.0))
             
             # Extract GT IVD on the fly
             gt_ivd = calculate_ivd(batch)
