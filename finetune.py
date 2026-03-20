@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=50, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--save_dir", type=str, default="./checkpoints_finetune", help="Save directory")
+    parser.add_argument("--pos_weight", type=float, default=2.0, help="Positive class weight for paper loss")
     
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
@@ -78,8 +79,9 @@ def main():
             
             pred_logits = model(batch) # B, 1, D, H, W
             
-            # Calculate loss using Paper-Consistent BCE + MSE (alpha=1.0, beta=1.0)
-            loss = vortex_mae_paper_loss(pred_logits, gt_mask)
+            # Calculate loss using Paper-Consistent BCE + MSE
+            # Passing configured pos_weight to handle sparse vortex structures
+            loss = vortex_mae_paper_loss(pred_logits, gt_mask, pos_weight=args.pos_weight)
             loss.backward()
             optimizer.step()
             if use_tpu:

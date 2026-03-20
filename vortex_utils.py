@@ -97,14 +97,16 @@ def vortex_mae_finetune_loss(pred_logits, target_mask, pos_weight=1.5):
     
     return 0.5 * bce + 0.5 * dice_loss
 
-def vortex_mae_paper_loss(pred_logits, target_mask, alpha=1.0, beta=1.0):
+def vortex_mae_paper_loss(pred_logits, target_mask, alpha=1.0, beta=1.0, pos_weight=2.0):
     """
-    Paper-Consistent Loss (Eq. 20-22): alpha * L_BCE + beta * L_L2 (MSE).
+    Paper-Consistent Loss (Eq. 20-22) with optional pos_weight for sparsity.
+    Added pos_weight to help re-connect fragmented vortex cores.
     """
-    # L_BCE (Eq. 20)
-    bce = F.binary_cross_entropy_with_logits(pred_logits, target_mask)
+    # L_BCE (Eq. 20) with weighted logits for balance
+    weight = torch.tensor([pos_weight], device=pred_logits.device)
+    bce = F.binary_cross_entropy_with_logits(pred_logits, target_mask, pos_weight=weight)
     
-    # L_L2 (Eq. 21) - Per-voxel L2 is equivalent to Mean Squared Error 
+    # L_L2 (Eq. 21)
     pred_prob = torch.sigmoid(pred_logits)
     mse = F.mse_loss(pred_prob, target_mask)
     
