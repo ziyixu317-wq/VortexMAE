@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--data_dir", type=str, required=True, help="Directory containing .vti files")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument("--epochs", type=int, default=2000, help="Number of epochs")
-    parser.add_argument("--lr", type=float, default=4e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (Lower for stability)")
     parser.add_argument("--mask_ratio", type=float, default=0.25, help="MAE masking ratio")
     parser.add_argument("--save_dir", type=str, default="./checkpoints_vortexmae", help="Save directory")
     
@@ -134,6 +134,19 @@ def main():
                 
                 # Save as VTI
                 # VTK uses (x, y, z)
+                
+                # IMPORTANT: Remove padding artifacts (D=80 vs CD=128)
+                # Check for zero slices at the end of D dimension
+                valid_d = vD
+                for d in range(vD - 1, -1, -1):
+                    if np.abs(gt[:, d, :, :]).sum() > 1e-6:
+                        valid_d = d + 1
+                        break
+                
+                pred = pred[:, :valid_d, :, :]
+                gt = gt[:, :valid_d, :, :]
+                vD = valid_d
+
                 vis_mesh = pv.ImageData()
                 vis_mesh.dimensions = (vW, vH, vD)
                 

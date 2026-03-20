@@ -2,6 +2,7 @@
 import os
 import argparse
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import numpy as np
 import pyvista as pv
@@ -54,17 +55,66 @@ def main():
     model.eval()
     
     # 3. Running Inference
-    print(f"Generating vortex identification masks for {args.num_samples} samples...")
+    print(f"Generating vortex identification masks for samples...")
+    
+    # Sliding window parameters
+    d_win, h_win, w_win = 128, 128, 128
+    stride = 96 # Overlap of 32
     
     counter = 0
     with torch.no_grad():
-        for batch in tqdm(test_loader):
+        for batch_idx, batch in enumerate(tqdm(test_loader)):
             if counter >= args.num_samples:
                 break
-                
+            
+            # batch: (1, 3, D, H, W)
+            _, _, D, H, W = batch.shape
             batch = batch.to(device)
-            # Pred output is sigmoid probability
-            pred_prob = model(batch)
+            
+            # Predict using sliding window
+            full_pred = torch.zeros((1, 1, D, H, W), device=device)
+            full_count = torch.zeros((1, 1, D, H, W), device=device)
+            
+            # Iterate over the grid
+            # Using min(i, max(0, D-d_win)) Ensures we cover the last part of each dimension
+            d_steps = list(range(0, max(1, D - d_win + 1), stride))
+            if d_steps[-1] < D - d_win: d_steps.append(D - d_win)
+            
+            h_steps = list(range(0, max(1, H - h_win + 1), stride))
+            if h_steps[-1] < H - h_win: h_steps.append(H - h_win)
+            
+            w_steps = list(range(0, max(1, W - w_win + 1), stride))
+            if w_steps[-1] < W - w_win: w_steps.append(W - w_win)
+
+            for d in d_steps:
+                for h in h_steps:
+                    for w in w_steps:
+                        # Extract crop
+                        d_s, d_e = d, d + d_win
+                        h_s, h_e = h, h + h_win
+                        w_s, w_e = w, w + w_win
+                        
+                        # Handle cases where grid is smaller than window
+                        d_e, h_e, w_e = min(d_e, D), min(h_e, H), min(w_e, W)
+                        crop = batch[:, :, d_s:d_e, h_s:h_e, w_s:w_e]
+                        
+                        # Pad if crop is smaller than 128 (e.g. if D=80)
+                        pd = d_win - (d_e - d_s)
+                        ph = h_win - (h_e - h_s)
+                        pw = w_win - (w_e - w_s)
+                        if pd > 0 or ph > 0 or pw > 0:
+                            crop = F.pad(crop, (0, pw, 0, ph, 0, pd))
+                        
+                        # Forward
+                        pred = model(crop) # (1, 1, 128, 128, 128)
+                        
+                        # Unpad and accumulate
+                        pred = pred[:, :, :d_e-d_s, :h_e-h_s, :w_e-w_s]
+                        full_pred[:, :, d_s:d_e, h_s:h_e, w_s:w_e] += pred
+                        full_count[:, :, d_s:d_e, h_s:h_e, w_s:w_e] += 1
+            
+            # Result is average of overlapping windows
+            pred_prob = full_pred / torch.clamp(full_count, min=1.0)
             
             # Extract GT IVD on the fly
             gt_ivd = calculate_ivd(batch)
@@ -75,9 +125,23 @@ def main():
             g_mask = gt_mask[0].cpu().numpy()
             b_mask = (p_mask > args.threshold).astype(np.float32)
             
-            # Save to VTI
+            # IMPORTANT: Remove padding artifacts (D=80 vs 128)
+            # Find the actual data range in D dimension by looking for non-zero slices in Ground Truth
+            valid_d = D
+            # If D is already correct (e.g. 80), this should be fine. 
+            # But let's be double sure for consistency with train.py
+            for d_idx in range(D - 1, -1, -1):
+                if np.abs(g_mask[d_idx]).sum() > 1e-6:
+                    valid_d = d_idx + 1
+                    break
+            
+            g_mask = g_mask[:valid_d, :, :]
+            p_mask = p_mask[:valid_d, :, :]
+            b_mask = b_mask[:valid_d, :, :]
+            
+            # Final VTI Dimensions (W, H, D)
             mesh = pv.ImageData()
-            mesh.dimensions = (W, H, D)
+            mesh.dimensions = (W, H, valid_d)
             
             mesh.point_data["GT_IVD_Mask"] = g_mask.flatten(order='C')
             mesh.point_data["Pred_Prob_Map"] = p_mask.flatten(order='C')

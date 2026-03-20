@@ -49,9 +49,9 @@ class VortexMAEDataset(Dataset):
         self.data_dir = data_dir
         self.normalize = normalize
         self.crop_size = crop_size
-        # Enable cropping for all splits to fit in TPU memory
-        # Full grids (80x240x640) exceed TPU HBM (15.75G)
-        self.do_crop = True
+        # Enable cropping for training/eval to fit in TPU memory
+        # But allow full grid for inference to support Sliding Window
+        self.do_crop = split not in ("inference")
         
         # Collect and sort all .vti files
         self.all_files = sorted(glob.glob(os.path.join(data_dir, "*.vti")))
