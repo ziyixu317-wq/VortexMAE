@@ -60,27 +60,34 @@ class VortexMAEDataset(Dataset):
             
         num_total = len(self.all_files)
         
-        if split == "pretrain_train":
-            end = max(int(num_total * 0.3), 1)
-            self.files = self.all_files[:end]
-        elif split == "pretrain_eval":
-            start = max(int(num_total * 0.3), 1)
-            end = max(int(num_total * 0.35), start + 1)
-            self.files = self.all_files[start:end]
-        elif split == "finetune_train":
-            start = max(int(num_total * 0.35), 2)
-            end = max(int(num_total * 0.4), start + 1)
-            self.files = self.all_files[start:end]
-        elif split == "inference":
-            start = max(int(num_total * 0.4), 3)
-            end = max(int(num_total * 0.7), start + 1)
-            self.files = self.all_files[start:end]
-        elif split == "train":
-            num_train = int(num_total * split_ratio)
-            self.files = self.all_files[:num_train]
+        if num_total < 12:
+            # Small dataset (e.g. 10 files): reuse files to ensure enough training steps
+            if split in ("pretrain_train", "finetune_train", "train"):
+                self.files = self.all_files[:max(1, int(num_total * 0.8))]
+            elif split == "pretrain_eval":
+                self.files = self.all_files[max(0, int(num_total * 0.8)):]
+            elif split == "inference":
+                self.files = self.all_files # Use all for inference test
+            else: # test/eval
+                self.files = self.all_files[max(0, int(num_total * 0.8)):]
         else:
-            num_train = int(num_total * split_ratio)
-            self.files = self.all_files[num_train:]
+            # Standard ratio-based splitting for larger datasets
+            if split == "pretrain_train":
+                self.files = self.all_files[:max(1, int(num_total * 0.7))]
+            elif split == "pretrain_eval":
+                start = max(1, int(num_total * 0.7))
+                self.files = self.all_files[start:max(start+1, int(num_total * 0.8))]
+            elif split == "finetune_train":
+                self.files = self.all_files[:max(1, int(num_total * 0.8))]
+            elif split == "inference":
+                start = max(1, int(num_total * 0.8))
+                self.files = self.all_files[start:]
+            elif split == "train":
+                num_train = int(num_total * split_ratio)
+                self.files = self.all_files[:num_train]
+            else: # test/eval
+                num_train = int(num_total * split_ratio)
+                self.files = self.all_files[num_train:]
             
         print(f"[{split}] Loading {len(self.files)} files from {data_dir}...")
         

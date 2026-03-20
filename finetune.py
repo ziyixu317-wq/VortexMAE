@@ -71,11 +71,9 @@ def main():
             batch = batch.to(device)
             optimizer.zero_grad()
             
-            # Generate IVD-based Ground Truth on the fly for demonstration
-            # In a real scenario, these would be pre-calculated and stored in the dataset
+            # Calculate Ground Truth Mask using IVD (Confirming with user: gt_ivd > 0 is correct)
             with torch.no_grad():
                 gt_ivd = calculate_ivd(batch) # Returns (B, D, H, W)
-                # Normalize IVD to [0, 1] for BCE
                 gt_mask = (gt_ivd > 0).float().unsqueeze(1) # B, 1, D, H, W
             
             pred_logits = model(batch) # B, 1, D, H, W

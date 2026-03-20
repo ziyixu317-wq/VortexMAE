@@ -57,20 +57,41 @@ def calculate_ivd(u_tensor, dx=1.0, dy=1.0, dz=1.0):
     
     # IVD: deviation from spatial mean
     mean_vort = torch.mean(vorticity_mag, dim=(1, 2, 3), keepdim=True)
-    ivd = vorticity_mag - mean_vort
+    ivd_val = vorticity_mag - mean_vort
     
-    return ivd
+    return ivd_val
 
-def vortex_mae_finetune_loss(pred_logits, target_mask, pos_weight=10.0):
+def calculate_q_criterion(u_tensor, dx=1.0, dy=1.0, dz=1.0):
+    """
+    Q-criterion: Second invariant of the velocity gradient tensor.
+    Q = 0.5 * (||Omega||^2 - ||S||^2) > 0 defines a vortex region.
+    """
+    grad_u = get_velocity_gradient(u_tensor, dx, dy, dz) # (B, 3, 3, D, H, W)
+    
+    # Calculate Frobenius norms squared of S and Omega
+    s_norm_sq = 0
+    omega_norm_sq = 0
+    
+    for i in range(3):
+        for j in range(3):
+            s_ij = 0.5 * (grad_u[:, i, j] + grad_u[:, j, i])
+            omega_ij = 0.5 * (grad_u[:, i, j] - grad_u[:, j, i])
+            s_norm_sq += s_ij**2
+            omega_norm_sq += omega_ij**2
+            
+    q = 0.5 * (omega_norm_sq - s_norm_sq)
+    return q
+
+def vortex_mae_finetune_loss(pred_logits, target_mask, pos_weight=1.5):
     """
     Combined Loss for Vortex Segmentation: Weighted BCE + Dice Loss
+    pos_weight set to 1.5 to prevent over-saturation ('bricks').
     """
     # 1. Weighted BCE with Logits
-    # pos_weight helps with the extreme sparsity of vortex regions
     weight = torch.tensor([pos_weight], device=pred_logits.device)
     bce = F.binary_cross_entropy_with_logits(pred_logits, target_mask, pos_weight=weight)
     
-    # 2. Dice Loss (ignores background dominance)
+    # 2. Dice Loss (Structural focus)
     pred_prob = torch.sigmoid(pred_logits)
     smooth = 1e-6
     intersection = (pred_prob * target_mask).sum()
