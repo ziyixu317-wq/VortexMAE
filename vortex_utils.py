@@ -120,3 +120,11 @@ def calculate_iou(pred_mask, gt_mask, threshold=0.5):
     intersection = (pred * gt_mask).sum()
     union = pred.sum() + gt_mask.sum() - intersection
     return (intersection + 1e-8) / (union + 1e-8)
+def calculate_psnr(pred, target, max_val=1.0):
+    """
+    Calculate Peak Signal-to-Noise Ratio for reconstructions.
+    """
+    mse = F.mse_loss(pred, target)
+    if mse == 0:
+        return torch.tensor(100.0)
+    return 10 * torch.log10(max_val**2 / (mse + 1e-10))

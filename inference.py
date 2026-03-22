@@ -128,10 +128,7 @@ def main():
             if HAS_SCIPY and not args.no_ccl:
                 labeled_array, num_features = ccl_label(pred_mask[0])
                 if num_features > 0:
-                    # Logic: Retain components larger than a tiny noise threshold (e.g., 10 voxels)
                     component_sizes = np.bincount(labeled_array.ravel())
-                    # The paper says "Largest connected vortex regions"
-                    # We'll keep components > 5% of max component size or a flat threshold
                     min_size = max(10, int(0.01 * component_sizes[1:].max()))
                     mask_ccl = np.zeros_like(pred_mask[0])
                     for i in range(1, num_features + 1):
@@ -141,11 +138,17 @@ def main():
             
             # Extract GT IVD on the fly
             gt_ivd = calculate_ivd(batch)
-            gt_mask = (gt_ivd > 0).float().cpu().numpy()
+            gt_mask = (gt_ivd > 0).float()
+            
+            # Calculate IoU for this sample
+            from vortex_utils import calculate_iou
+            sample_iou = calculate_iou(torch.from_numpy(pred_mask).to(device), gt_mask).item()
+            print(f"Sample {counter:03d} | IoU: {sample_iou:.4f}")
             
             # Prepare data for VTI (Squeeze batch/channel if needed)
+            gt_mask_np = gt_mask.cpu().numpy()
             p_mask = pred_mask[0, 0] if pred_mask.ndim == 5 else pred_mask[0]
-            g_mask = gt_mask[0]
+            g_mask = gt_mask_np[0]
             b_mask = (p_mask > args.threshold).astype(np.float32)
             
             # IMPORTANT: Remove padding artifacts (D=80 vs 128)

@@ -11,6 +11,7 @@ import pyvista as pv
 
 from dataset import VortexMAEDataset
 from model import VortexMAE, vortex_mae_pretrain_loss
+from vortex_utils import calculate_psnr
 
 def main():
     parser = argparse.ArgumentParser(description="VortexMAE Pre-training Script (Paper Consistent)")
@@ -85,17 +86,21 @@ def main():
         # 4. Evaluation
         model.eval()
         test_loss = 0.0
+        test_psnr = 0.0
         with torch.no_grad():
             for batch in test_loader:
                 batch = batch.to(device)
                 x_rec, mask = model(batch)
                 loss = vortex_mae_pretrain_loss(x_rec, batch, mask)
                 test_loss += loss.item()
+                # PSNR (Reconstruction quality)
+                test_psnr += calculate_psnr(x_rec, batch).item()
         
         avg_test_loss = test_loss / len(test_loader)
+        avg_test_psnr = test_psnr / len(test_loader)
         scheduler.step()
         
-        print(f"Epoch {epoch} | Train MSE: {avg_train_loss:.6f} | Test MSE: {avg_test_loss:.6f}")
+        print(f"Epoch {epoch} | Train MSE: {avg_train_loss:.6f} | Test MSE: {avg_test_loss:.6f} | Test PSNR: {avg_test_psnr:.2f} dB")
         
         # 5. Checkpointing
         if avg_test_loss < best_loss:
