@@ -8,7 +8,7 @@ from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
 import numpy as np
 import pyvista as pv
-
+import torch.nn as nn
 from dataset import VortexMAEDataset
 from model import VortexMAE, vortex_mae_pretrain_loss
 from vortex_utils import calculate_psnr
@@ -54,10 +54,19 @@ def main():
         in_chans=in_chans,
         mask_ratio=args.mask_ratio,
         embed_dim=48,
-        depths=[2, 2, 18, 2],
+        depths=[2, 2, 12, 2],
         num_heads=[3, 6, 12, 24]
     ).to(device)
     
+    if device.type == 'cuda':
+        # 转换 SyncBatchNorm，保证小 BatchSize 下均值方差计算准确
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        
+        # 启用双卡并行
+        if torch.cuda.device_count() > 1:
+            print(f"🔥 成功激活 {torch.cuda.device_count()} 张 GPU 进行 DataParallel 训练！")
+            model = nn.DataParallel(model)
+
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05, betas=(0.9, 0.99))
     scheduler = StepLR(optimizer, step_size=100, gamma=0.8)
     

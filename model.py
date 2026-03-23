@@ -11,7 +11,7 @@ class VortexMAE(nn.Module):
     Architecture: Swin Transformer Encoder + U-Net Transposed Conv Decoder.
     """
     def __init__(self, patch_size=(4, 4, 4), in_chans=3, out_chans=1,
-                 embed_dim=48, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24], 
+                 embed_dim=48, depths=[2, 2, 12, 2], num_heads=[3, 6, 12, 24], 
                  window_size=(4, 4, 4), mask_ratio=0.25, mode='pretrain'):
         super().__init__()
         self.patch_size = patch_size
