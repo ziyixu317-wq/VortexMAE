@@ -2,6 +2,7 @@
 import os
 import argparse
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import StepLR
@@ -49,7 +50,7 @@ def main():
         out_chans=1,
         mode='segmentation' # Switch to segmentation mode
     )
-    
+
     # Load pre-trained encoder weights (load to CPU first for TPU compatibility)
     print(f"Loading pre-trained weights from {args.pretrained_ckpt}...")
     checkpoint = torch.load(args.pretrained_ckpt, map_location='cpu')
@@ -57,6 +58,15 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model = model.to(device)
     
+    if device.type == 'cuda':
+        # 转换 SyncBatchNorm，保证小 BatchSize 下均值方差计算准确
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        
+        # 启用双卡并行
+        if torch.cuda.device_count() > 1:
+            print(f"🔥 成功激活 {torch.cuda.device_count()} 张 GPU 进行 DataParallel 训练！")
+            model = nn.DataParallel(model)
+
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05, betas=(0.9, 0.99))
     scheduler = StepLR(optimizer, step_size=100, gamma=0.8)
     

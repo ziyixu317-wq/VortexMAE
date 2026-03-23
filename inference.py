@@ -3,6 +3,7 @@ import os
 import argparse
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
 import pyvista as pv
@@ -59,6 +60,16 @@ def main():
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
+
+    if device.type == 'cuda':
+        # 转换 SyncBatchNorm，保证小 BatchSize 下均值方差计算准确
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        
+        # 启用双卡并行
+        if torch.cuda.device_count() > 1:
+            print(f"🔥 成功激活 {torch.cuda.device_count()} 张 GPU 进行 DataParallel 训练！")
+            model = nn.DataParallel(model)
+
     model.eval()
     
     # 3. Running Inference
