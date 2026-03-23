@@ -91,7 +91,7 @@ def main():
     
     # SyncBatchNorm and DDP
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
     
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05, betas=(0.9, 0.99))
     scheduler = StepLR(optimizer, step_size=100, gamma=0.8)
