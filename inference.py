@@ -58,7 +58,22 @@ def main():
     
     print(f"Loading fine-tuned checkpoint from {args.checkpoint}...")
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
-    model.load_state_dict(checkpoint['model_state_dict'])
+    
+        # 1. 取出保存的权重字典
+    state_dict = checkpoint['model_state_dict']
+
+    # 2. 创建一个新的字典，用来存放去掉 'module.' 前缀的权重
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+
+    for k, v in state_dict.items():
+        # 如果 key 包含 'module.' 前缀，就把它切掉 (7个字符)
+        name = k[7:] if k.startswith('module.') else k 
+        new_state_dict[name] = v
+
+    # 3. 将清理过前缀的权重加载到模型中
+    model.load_state_dict(new_state_dict)
+
     model = model.to(device)
 
     if device.type == 'cuda':

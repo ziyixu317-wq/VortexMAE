@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 def get_velocity_gradient(u_tensor, dx=1.0, dy=1.0, dz=1.0):
-    """
+    r"""
     u_tensor: (B, 3, D, H, W)
     Returns grad_u: (B, 3, 3, D, H, W)
     grad_u[:, i, j] = \partial u_i / \partial x_j
