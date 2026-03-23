@@ -49,18 +49,16 @@ class VortexMAEDataset(Dataset):
         self.data_dir = data_dir
         self.normalize = normalize
         self.crop_size = crop_size
-        # Enable cropping for training/eval to fit in TPU memory
-        # But allow full grid for inference to support Sliding Window
         self.do_crop = split not in ("inference")
         
-        # Collect and sort all .vti files
+        # 1. Collect and sort all .vti files
         self.all_files = sorted(glob.glob(os.path.join(data_dir, "*.vti")))
         if not self.all_files:
             raise FileNotFoundError(f"No .vti files found in {data_dir}")
             
         num_total = len(self.all_files)
         
-        # Consistent split indices
+        # 2. Consistent split indices
         idx_p1 = int(num_total * 0.25)
         idx_p2 = int(num_total * 0.35)
         idx_f = int(num_total * 0.6)
@@ -74,63 +72,74 @@ class VortexMAEDataset(Dataset):
         elif split == "inference":
             remaining_files = self.all_files[idx_f:]
             if len(remaining_files) > 0:
-                # Use a fixed seed for reproducible "random" selection as requested
                 import random
                 rng = random.Random(42)
                 self.files = sorted(rng.sample(remaining_files, k=min(3, len(remaining_files))))
             else:
                 self.files = []
         elif split == "train":
-            # Backward compatibility for generic 'train' split if needed
             self.files = self.all_files[:int(num_total * split_ratio)]
         else: # test/eval/other
             self.files = self.all_files[int(num_total * split_ratio):]
             
-        print(f"[{split}] Loading {len(self.files)} files from {data_dir}...")
+        print(f"[{split}] Lazy loading {len(self.files)} files from {data_dir}...")
         
-        # Pre-load raw data into memory
-        self.data = []
-        for f in self.files:
-            self.data.append(read_vti_velocity(f))
-        
-        self.data = np.stack(self.data, axis=0)  # (N, 3, D, H, W)
-        
-        if self.normalize:
-            # Paper Eq. 2: Channel-wise min-max normalization
-            # v_hat_i = (v_i - min(v_i)) / (max(v_i) - min(v_i) + eps)
-            eps = 1e-8
-            # Compute per-channel min/max across all samples and spatial dims
-            # Shape: (1, 3, 1, 1, 1)
-            self.ch_min = self.data.min(axis=(0, 2, 3, 4), keepdims=True)
-            self.ch_max = self.data.max(axis=(0, 2, 3, 4), keepdims=True)
-            self.data = (self.data - self.ch_min) / (self.ch_max - self.ch_min + eps)
-        
-        _, _, D, H, W = self.data.shape
-        print(f"  Grid shape: D={D}, H={H}, W={W} | Crop={self.do_crop} (size={crop_size})")
+        # 3. Memory-efficient min-max calculation
+        if self.normalize and self.files:
+            from tqdm import tqdm
+            print(f"  Calculating normalization stats (streaming)...")
+            self.ch_min = None
+            self.ch_max = None
+            
+            for f in tqdm(self.files, desc="Global Stats", leave=False):
+                sample = read_vti_velocity(f) # (3, D, H, W)
+                # Compute min/max for this file per channel
+                f_min = sample.min(axis=(1, 2, 3), keepdims=True) # (3, 1, 1, 1)
+                f_max = sample.max(axis=(1, 2, 3), keepdims=True)
+                
+                if self.ch_min is None:
+                    self.ch_min = f_min
+                    self.ch_max = f_max
+                else:
+                    self.ch_min = np.minimum(self.ch_min, f_min)
+                    self.ch_max = np.maximum(self.ch_max, f_max)
+            
+            # Final shapes: (1, 3, 1, 1, 1) for broadcasting with (N, 3, D, H, W) in memory-based logic
+            # Here we'll use (3, 1, 1, 1) for lazy loading samples
+            print(f"  Normalization stats captured.")
+
+        # 4. Get Grid Shape from first file
+        if self.files:
+            s0 = read_vti_velocity(self.files[0])
+            self.grid_shape = s0.shape[1:]
+            print(f"  Grid shape: {self.grid_shape} | Crop={self.do_crop} (size={crop_size})")
 
     def __len__(self):
-        return len(self.data)
+        return len(self.files)
 
     def __getitem__(self, idx):
-        sample = self.data[idx]  # (3, D, H, W)
+        # Lazy load from disk
+        sample = read_vti_velocity(self.files[idx]) # (3, D, H, W)
+        
+        if self.normalize:
+            eps = 1e-8
+            # Normalize using pre-calculated global stats
+            sample = (sample - self.ch_min) / (self.ch_max - self.ch_min + eps)
         
         if self.do_crop:
             _, D, H, W = sample.shape
             cs = self.crop_size
             
-            # Clamp crop_size to actual dimension (handles grids < 128)
             cd = min(cs, D)
             ch = min(cs, H)
             cw = min(cs, W)
             
-            # Random start indices
             d0 = np.random.randint(0, D - cd + 1) if D > cd else 0
             h0 = np.random.randint(0, H - ch + 1) if H > ch else 0
             w0 = np.random.randint(0, W - cw + 1) if W > cw else 0
             
             sample = sample[:, d0:d0+cd, h0:h0+ch, w0:w0+cw]
             
-            # Pad to crop_size if any dim was smaller
             if cd < cs or ch < cs or cw < cs:
                 padded = np.zeros((3, cs, cs, cs), dtype=np.float32)
                 padded[:, :cd, :ch, :cw] = sample
@@ -140,4 +149,4 @@ class VortexMAEDataset(Dataset):
 
     @property
     def spatial_shape(self):
-        return self.data.shape[2:]
+        return self.grid_shape
