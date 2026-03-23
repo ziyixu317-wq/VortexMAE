@@ -59,9 +59,9 @@ class VortexMAEDataset(Dataset):
         num_total = len(self.all_files)
         
         # 2. Consistent split indices
-        idx_p1 = int(num_total * 0.25)
-        idx_p2 = int(num_total * 0.35)
-        idx_f = int(num_total * 0.6)
+        idx_p1 = int(num_total * 0.3)
+        idx_p2 = int(num_total * 0.4)
+        idx_f = int(num_total * 0.65)
         
         if split == "pretrain_train":
             self.files = self.all_files[:max(1, idx_p1)]
