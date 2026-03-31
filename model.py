@@ -54,16 +54,11 @@ class VortexMAE(nn.Module):
             nn.Conv3d(d1, embed_dim, kernel_size=3, padding=1)
         )
         
-        # Final reconstruction layer for pre-training (3-channel velocity)
-        self.up_final_rec = nn.Sequential(
+        # Final output head (Dynamic channels based on mode to avoid DDP unused parameter error)
+        head_chans = in_chans if mode == 'pretrain' else out_chans
+        self.up_final = nn.Sequential(
             nn.Upsample(scale_factor=patch_size, mode='trilinear', align_corners=False),
-            nn.Conv3d(embed_dim, in_chans, kernel_size=3, padding=1)
-        )
-        
-        # Final segmentation head for fine-tuning (out_chans-channel mask, usually 1)
-        self.up_final_seg = nn.Sequential(
-            nn.Upsample(scale_factor=patch_size, mode='trilinear', align_corners=False),
-            nn.Conv3d(embed_dim, out_chans, kernel_size=3, padding=1)
+            nn.Conv3d(embed_dim, head_chans, kernel_size=3, padding=1)
         )
 
     def forward(self, x):
@@ -129,17 +124,15 @@ class VortexMAE(nn.Module):
         else:
             z = upsample_add(z, outs[0], self.up_stage1)
         
-        # Final layer based on mode
+        # Final layer
+        out = self.up_final(z)
+        out = out[:, :, :D, :H, :W] # Crop to exact input size
+        
         if self.mode == 'pretrain':
-            out = self.up_final_rec(z)
-            # Crop to exact input size (Upsample may overshoot)
-            out = out[:, :, :D, :H, :W]
             mask_pixel = F.interpolate(mask.permute(0, 4, 1, 2, 3), 
                                        size=(D, H, W), mode='nearest')
             return out, mask_pixel
         else:
-            out = self.up_final_seg(z)
-            out = out[:, :, :D, :H, :W]
             # Return raw logits for more stable BCEWithLogitsLoss
             return out
 
