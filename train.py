@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--save_dir", type=str, default="./checkpoints_pretrain", help="Save directory")
     parser.add_argument("--mask_ratio", type=float, default=0.25, help="MAE mask ratio")
     parser.add_argument("--use_checkpoint", action="store_true", help="Use gradient checkpointing")
+    parser.add_argument("--accumulation_steps", type=int, default=1, help="Number of gradient accumulation steps")
     return parser.parse_args()
 
 def print_tpu_memory():
@@ -154,20 +155,24 @@ def main():
             if IS_TPU:
                 xs.mark_sharding(batch, mesh, ('data', None, None, None, None))
             
-            optimizer.zero_grad()
-            
             # Use autocast for TPU to save memory (HBM)
             if IS_TPU:
                 with torch.autocast(device_type='xla', dtype=torch.bfloat16):
                     x_rec, mask = model(batch)
                     loss = vortex_mae_pretrain_loss(x_rec, batch, mask)
+                    loss = loss / args.accumulation_steps
                 loss.backward()
-                xm.optimizer_step(optimizer)
+                if (num_batches + 1) % args.accumulation_steps == 0:
+                    xm.optimizer_step(optimizer)
+                    optimizer.zero_grad()
             else:
                 x_rec, mask = model(batch)
                 loss = vortex_mae_pretrain_loss(x_rec, batch, mask)
+                loss = loss / args.accumulation_steps
                 loss.backward()
-                optimizer.step()
+                if (num_batches + 1) % args.accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
                 
             train_loss_val += loss.item()
             num_batches += 1

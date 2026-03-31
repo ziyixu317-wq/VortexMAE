@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--save_dir", type=str, default="./checkpoints_finetune", help="Save directory")
     parser.add_argument("--pos_weight", type=float, default=2.0, help="Positive class weight")
     parser.add_argument("--use_checkpoint", action="store_true", help="Use gradient checkpointing")
+    parser.add_argument("--accumulation_steps", type=int, default=1, help="Number of gradient accumulation steps")
     return parser.parse_args()
 
 def print_tpu_memory():
@@ -161,13 +162,19 @@ def main():
                     pred_logits = model(batch)
                     # Cast gt_mask to bfloat16 for TPU compatibility
                     loss = vortex_mae_paper_loss(pred_logits, gt_mask.to(torch.bfloat16), pos_weight=args.pos_weight)
+                    loss = loss / args.accumulation_steps
                 loss.backward()
-                xm.optimizer_step(optimizer)
+                if (num_batches + 1) % args.accumulation_steps == 0:
+                    xm.optimizer_step(optimizer)
+                    optimizer.zero_grad()
             else:
                 pred_logits = model(batch)
                 loss = vortex_mae_paper_loss(pred_logits, gt_mask, pos_weight=args.pos_weight)
+                loss = loss / args.accumulation_steps
                 loss.backward()
-                optimizer.step()
+                if (num_batches + 1) % args.accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
             
             epoch_loss += loss.item()
             pred_prob = torch.sigmoid(pred_logits)
