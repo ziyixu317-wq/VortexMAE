@@ -120,9 +120,9 @@ def main():
     model = VortexMAE(
         in_chans=in_chans,
         mask_ratio=args.mask_ratio,
-        embed_dim=48,
+        embed_dim=64,
         depths=[2, 2, 18, 2],
-        num_heads=[3, 6, 12, 24],
+        num_heads=[4, 8, 16, 32],
         use_checkpoint=args.use_checkpoint if not IS_TPU else True # Auto-enable on TPU
     ).to(device)
     

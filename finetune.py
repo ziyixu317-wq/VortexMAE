@@ -105,6 +105,7 @@ def main():
     
     # 4. Model Initialization
     model = VortexMAE(in_chans=in_chans, out_chans=1, mode='segmentation', 
+                      embed_dim=64, depths=[2, 2, 18, 2], num_heads=[4, 8, 16, 32],
                       use_checkpoint=args.use_checkpoint if not IS_TPU else True).to(device)
     
     if IS_TPU:
