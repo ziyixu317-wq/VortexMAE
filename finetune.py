@@ -1,4 +1,3 @@
-
 import os
 import argparse
 import torch
@@ -11,6 +10,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
 import numpy as np
+import contextlib
 
 from dataset import VortexMAEDataset
 from model import VortexMAE
@@ -109,6 +109,9 @@ def main():
                       embed_dim=64, depths=[2, 2, 18, 2], num_heads=[4, 8, 16, 32],
                       use_checkpoint=args.use_checkpoint if not IS_TPU else True).to(device)
     
+    if rank == 0:
+        print(f" [TPU Config] Model embed_dim: {model.encoder.embed_dim} | heads: {model.encoder.layers[0].num_heads}")
+    
     if IS_TPU:
         model = model.to(torch.bfloat16)
     
@@ -168,11 +171,17 @@ def main():
                     xm.optimizer_step(optimizer)
                     optimizer.zero_grad()
             else:
-                pred_logits = model(batch)
-                loss = vortex_mae_paper_loss(pred_logits, gt_mask, pos_weight=args.pos_weight)
-                loss = loss / args.accumulation_steps
-                loss.backward()
-                if (num_batches + 1) % args.accumulation_steps == 0:
+                # GPU path with DDP no_sync
+                is_sync_step = (num_batches + 1) % args.accumulation_steps == 0
+                context = contextlib.nullcontext() if is_sync_step else model.no_sync()
+                
+                with context:
+                    pred_logits = model(batch)
+                    loss = vortex_mae_paper_loss(pred_logits, gt_mask, pos_weight=args.pos_weight)
+                    loss = loss / args.accumulation_steps
+                    loss.backward()
+                
+                if is_sync_step:
                     optimizer.step()
                     optimizer.zero_grad()
             

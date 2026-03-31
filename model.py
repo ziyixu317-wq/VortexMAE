@@ -27,6 +27,9 @@ class VortexMAE(nn.Module):
             patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, 
             depths=depths, num_heads=num_heads, window_size=window_size
         )
+        if self.use_checkpoint:
+            for layer in self.encoder.layers:
+                layer.use_checkpoint = True
         
         # 2. Mask Token (only used in pre-training)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, 1, embed_dim))
@@ -89,40 +92,42 @@ class VortexMAE(nn.Module):
         outs = []
         curr_x = x_input
         for layer in self.encoder.layers:
-            if self.use_checkpoint:
-                from torch.utils.checkpoint import checkpoint
-                # Workaround for torch.utils.checkpoint not finding torch.xla in some envs
-                if not hasattr(torch, 'xla'):
-                    try:
-                        import torch_xla
-                        torch.xla = torch_xla
-                    except ImportError:
-                        pass
-                # Use checkpoint for each Swin stage to minimize memory
-                x_layer_out, curr_x = checkpoint(layer, curr_x, use_reentrant=False)
-            else:
-                x_layer_out, curr_x = layer(curr_x)
+            # Note: BasicLayer3D now handles its own internal block-level checkpointing
+            x_layer_out, curr_x = layer(curr_x)
             outs.append(x_layer_out)
         
         # --- 3. U-Net Decoder (Expansive Path) ---
+        # Helper for decoder checkpointing
+        def upsample_add(z, skip, up_op):
+            z = up_op(z)
+            sh = skip.shape
+            # Handle possible rounding differences in upsampling
+            z = z[:, :, :sh[1], :sh[2], :sh[3]]
+            return z + skip.permute(0, 4, 1, 2, 3)
+
         # Stage 3 -> 2
         z = outs[3].permute(0, 4, 1, 2, 3) 
-        z = self.up_stage3(z)
-        sh2 = outs[2].shape
-        z = z[:, :, :sh2[1], :sh2[2], :sh2[3]] 
-        z = z + outs[2].permute(0, 4, 1, 2, 3)
+        if self.use_checkpoint:
+            from torch.utils.checkpoint import checkpoint
+            # Workaround for torch.utils.checkpoint not finding torch.xla in some envs
+            if not hasattr(torch, 'xla'):
+                try: import torch_xla; torch.xla = torch_xla
+                except ImportError: pass
+            z = checkpoint(upsample_add, z, outs[2], self.up_stage3, use_reentrant=False)
+        else:
+            z = upsample_add(z, outs[2], self.up_stage3)
         
         # Stage 2 -> 1
-        z = self.up_stage2(z)
-        sh1 = outs[1].shape
-        z = z[:, :, :sh1[1], :sh1[2], :sh1[3]]
-        z = z + outs[1].permute(0, 4, 1, 2, 3)
+        if self.use_checkpoint:
+            z = checkpoint(upsample_add, z, outs[1], self.up_stage2, use_reentrant=False)
+        else:
+            z = upsample_add(z, outs[1], self.up_stage2)
         
         # Stage 1 -> 0
-        z = self.up_stage1(z)
-        sh0 = outs[0].shape
-        z = z[:, :, :sh0[1], :sh0[2], :sh0[3]]
-        z = z + outs[0].permute(0, 4, 1, 2, 3)
+        if self.use_checkpoint:
+            z = checkpoint(upsample_add, z, outs[0], self.up_stage1, use_reentrant=False)
+        else:
+            z = upsample_add(z, outs[0], self.up_stage1)
         
         # Final layer based on mode
         if self.mode == 'pretrain':
