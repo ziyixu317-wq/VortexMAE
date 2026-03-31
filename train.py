@@ -17,7 +17,7 @@ from dataset import VortexMAEDataset
 from model import VortexMAE, vortex_mae_pretrain_loss
 from vortex_utils import calculate_psnr
 
-# TPU Support Detection (Environment-based)
+# 1. Hardware Detection
 IS_TPU = (os.environ.get('TPU_NAME') is not None or 
           os.environ.get('TPU_ACCELERATOR_TYPE') is not None or
           os.environ.get('KAGGLE_TPU_VERSION') is not None)
@@ -26,251 +26,175 @@ if IS_TPU:
     try:
         import torch_xla
         import torch_xla.core.xla_model as xm
-        import torch_xla.distributed.parallel_loader as pl
-        import torch_xla.distributed.xla_multiprocessing as xmp
+        import torch_xla.runtime as xr
+        import torch_xla.distributed.spmd as xs
+        # CRITICAL: Enable SPMD before any XLA operations
+        xr.use_spmd()
     except ImportError:
         IS_TPU = False
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VortexMAE Pre-training (GPU/TPU)")
     parser.add_argument("--data_dir", type=str, required=True, help="Directory containing .vti files")
-    parser.add_argument("--batch_size", type=int, default=16, help="TOTAL batch size across all devices")
+    parser.add_argument("--batch_size", type=int, default=16, help="TOTAL batch size")
     parser.add_argument("--epochs", type=int, default=2000, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--save_dir", type=str, default="./checkpoints_pretrain", help="Save directory")
+    parser.add_argument("--mask_ratio", type=float, default=0.25, help="MAE mask ratio")
     return parser.parse_args()
 
-# ============================================================
-# GPU Path: launched via torchrun
-# ============================================================
-def setup_ddp_gpu():
-    """Initialize DDP for GPU via torchrun."""
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    if not dist.is_initialized():
-        dist.init_process_group(backend="nccl", init_method="env://")
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
-    return rank, world_size, local_rank, device
+def setup_gpu_ddp():
+    """Initialize DDP for GPU."""
+    if 'RANK' in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl", init_method="env://")
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        return rank, world_size, local_rank, device
+    else:
+        # Single GPU fallback
+        return 0, 1, 0, torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def main_gpu():
-    """GPU entry point (called by torchrun)."""
+def main():
     args = parse_args()
-    rank, world_size, local_rank, device = setup_ddp_gpu()
-    _train_loop(args, rank, world_size, device, is_tpu=False)
-
-# ============================================================
-# TPU Path: launched via xmp.spawn
-# ============================================================
-def _mp_fn(index, args):
-    """TPU worker function. index = 0..7, assigned by xmp.spawn."""
-    device = xm.xla_device()
-    rank = xm.get_ordinal()
-    world_size = xm.xrt_world_size()
     
-    _train_loop(args, rank, world_size, device, is_tpu=True)
+    # 2. Strategy Setup
+    if IS_TPU:
+        device = xm.xla_device()
+        rank = 0  # Single process in SPMD
+        world_size = 1 
+        local_rank = 0
+        num_cores = xr.global_runtime_device_count()
+        # Define 1D mesh for data parallelism
+        mesh = xs.Mesh(np.arange(num_cores), (num_cores,), ('data',))
+        if rank == 0:
+            print(f"TPU SPMD Mode: Controlling {num_cores} cores from 1 process.")
+    else:
+        rank, world_size, local_rank, device = setup_gpu_ddp()
+        if rank == 0:
+            print(f"GPU DDP Mode: Rank {rank}/{world_size} on {device}")
 
-# ============================================================
-# Shared Training Loop
-# ============================================================
-def _train_loop(args, rank, world_size, device, is_tpu):
     if rank == 0:
         os.makedirs(args.save_dir, exist_ok=True)
-        print(f"Training on {'TPU' if is_tpu else 'GPU'}: Rank {rank}/{world_size} on {device}")
-        print(f"Config: Total Batch Size={args.batch_size}, LR={args.lr}")
 
-    # 1. Datasets & Samplers
+    # 3. Datasets
     train_dataset = VortexMAEDataset(args.data_dir, split="pretrain_train")
     test_dataset = VortexMAEDataset(args.data_dir, split="pretrain_eval")
     
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    # SPMD uses single sampler, DDP uses DistributedSampler
+    if IS_TPU:
+        train_sampler = None
+        test_sampler = None
+        shuffle_train = True
+    else:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+        shuffle_train = False
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size if IS_TPU else args.batch_size // world_size, 
+                              sampler=train_sampler, shuffle=shuffle_train, num_workers=4, drop_last=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size if IS_TPU else args.batch_size // world_size, 
+                             sampler=test_sampler, num_workers=4, drop_last=True)
     
-    batch_size_per_device = args.batch_size // world_size
+    in_chans, D, H, W = train_dataset[0].shape
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size_per_device, sampler=train_sampler, num_workers=4, drop_last=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size_per_device, sampler=test_sampler, num_workers=4, drop_last=True)
-    
-    # Get spatial dimensions
-    sample = train_dataset[0]
-    in_chans, D, H, W = sample.shape
-    
-    # 2. Model
+    # 4. Model
     model = VortexMAE(
         in_chans=in_chans,
-        mask_ratio=args.mask_ratio if hasattr(args, 'mask_ratio') else 0.25,
+        mask_ratio=args.mask_ratio,
         embed_dim=48,
         depths=[2, 2, 18, 2],
         num_heads=[3, 6, 12, 24]
     ).to(device)
     
-    if is_tpu:
-        # No DDP wrapper needed on TPU with xmp.spawn; 
-        # xm.optimizer_step handles gradient sync
-        pass
-    else:
+    if not IS_TPU and world_size > 1:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05, betas=(0.9, 0.99))
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
     scheduler = StepLR(optimizer, step_size=100, gamma=0.8)
     
-    # 3. Training Loop
+    # 5. Loop
     best_loss = float('inf')
     
     for epoch in range(1, args.epochs + 1):
         model.train()
-        train_sampler.set_epoch(epoch)
-        train_loss = torch.tensor(0.0, device=device)
+        if train_sampler:
+            train_sampler.set_epoch(epoch)
+        
+        train_loss_val = 0.0
         num_batches = 0
         
-        # TPU Parallel Loader
-        if is_tpu:
-            effective_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
-        else:
-            effective_loader = train_loader
-
-        for batch in effective_loader:
+        for batch in train_loader:
             batch = batch.to(device)
-            optimizer.zero_grad()
             
+            # SPMD: Shard batch across cores
+            if IS_TPU:
+                xs.mark_sharding(batch, mesh, ('data', None, None, None, None))
+            
+            optimizer.zero_grad()
             x_rec, mask = model(batch)
             loss = vortex_mae_pretrain_loss(x_rec, batch, mask)
-            
             loss.backward()
             
-            if is_tpu:
+            if IS_TPU:
                 xm.optimizer_step(optimizer)
             else:
                 optimizer.step()
                 
-            train_loss += loss.detach()
+            train_loss_val += loss.item()
             num_batches += 1
             
-        # Synchronize loss
-        if is_tpu:
-            train_loss_reduced = xm.mesh_reduce('train_loss', train_loss.item(), lambda x: sum(x))
-            total_batches = xm.mesh_reduce('num_batches', num_batches, lambda x: sum(x))
-            avg_train_loss = train_loss_reduced / max(total_batches, 1)
-        else:
-            dist.all_reduce(train_loss, op=dist.ReduceOp.SUM)
-            avg_train_loss = train_loss.item() / (len(train_loader) * world_size)
+        avg_train_loss = train_loss_val / max(num_batches, 1)
         
-        # Evaluation
+        # Test Loop
         model.eval()
-        test_loss = torch.tensor(0.0, device=device)
-        test_psnr = torch.tensor(0.0, device=device)
+        test_loss_val = 0.0
+        test_psnr_val = 0.0
         num_test_batches = 0
         
-        if is_tpu:
-            effective_test_loader = pl.ParallelLoader(test_loader, [device]).per_device_loader(device)
-        else:
-            effective_test_loader = test_loader
-
         with torch.no_grad():
-            for batch in effective_test_loader:
+            for batch in test_loader:
                 batch = batch.to(device)
+                if IS_TPU:
+                    xs.mark_sharding(batch, mesh, ('data', None, None, None, None))
+                    
                 x_rec, mask = model(batch)
                 loss = vortex_mae_pretrain_loss(x_rec, batch, mask)
-                test_loss += loss.detach()
-                test_psnr += calculate_psnr(x_rec, batch).detach()
+                psnr = calculate_psnr(x_rec, batch)
+                
+                test_loss_val += loss.item()
+                test_psnr_val += psnr.item()
                 num_test_batches += 1
         
-        if is_tpu:
-            test_loss_reduced = xm.mesh_reduce('test_loss', test_loss.item(), lambda x: sum(x))
-            test_psnr_reduced = xm.mesh_reduce('test_psnr', test_psnr.item(), lambda x: sum(x))
-            total_test_batches = xm.mesh_reduce('num_test_batches', num_test_batches, lambda x: sum(x))
-            avg_test_loss = test_loss_reduced / max(total_test_batches, 1)
-            avg_test_psnr = test_psnr_reduced / max(total_test_batches, 1)
-        else:
-            dist.all_reduce(test_loss, op=dist.ReduceOp.SUM)
-            dist.all_reduce(test_psnr, op=dist.ReduceOp.SUM)
-            avg_test_loss = test_loss.item() / (len(test_loader) * world_size)
-            avg_test_psnr = test_psnr.item() / (len(test_loader) * world_size)
+        avg_test_loss = test_loss_val / max(num_test_batches, 1)
+        avg_test_psnr = test_psnr_val / max(num_test_batches, 1)
         
         scheduler.step()
         
-        # Logging & Checkpointing (master only)
-        if is_tpu:
-            is_master = xm.is_master_ordinal()
-        else:
-            is_master = (rank == 0)
-            
-        if is_master:
-            print(f"Epoch {epoch} | Train MSE: {avg_train_loss:.6f} | Test MSE: {avg_test_loss:.6f} | Test PSNR: {avg_test_psnr:.2f} dB")
+        if rank == 0:
+            print(f"Epoch {epoch} | Train: {avg_train_loss:.6f} | Test: {avg_test_loss:.6f} | PSNR: {avg_test_psnr:.2f}dB")
             
             if avg_test_loss < best_loss:
                 best_loss = avg_test_loss
                 ckpt_path = os.path.join(args.save_dir, "vortexmae_best.pth")
-                checkpoint_model = model.module if hasattr(model, 'module') else model
-                
-                if is_tpu:
-                    xm.save({
-                        'epoch': epoch,
-                        'model_state_dict': checkpoint_model.state_dict(),
-                        'loss': best_loss
-                    }, ckpt_path)
+                raw_model = model.module if hasattr(model, 'module') else model
+                save_dict = {
+                    'epoch': epoch,
+                    'model_state_dict': raw_model.state_dict(),
+                    'loss': best_loss
+                }
+                if IS_TPU:
+                    xm.save(save_dict, ckpt_path)
                 else:
-                    torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': checkpoint_model.state_dict(),
-                        'loss': best_loss
-                    }, ckpt_path)
-                print(f" -> Saved best checkpoint: {ckpt_path}")
-            
-            # Visualization (master only, skip on TPU to avoid host transfer overhead)
-            if not is_tpu and (epoch % 10 == 0 or epoch == args.epochs):
-                with torch.no_grad():
-                    sample_batch = next(iter(test_loader)).to(device)
-                    x_rec, mask = model(sample_batch)
-                    pred = x_rec[0].cpu().numpy()
-                    gt = sample_batch[0].cpu().numpy()
-                    
-                    _, vD, vH, vW = pred.shape
-                    try:
-                        ch_min = test_dataset.ch_min.squeeze()
-                        ch_max = test_dataset.ch_max.squeeze()
-                        for c in range(in_chans):
-                            pred[c] = pred[c] * (ch_max[c] - ch_min[c]) + ch_min[c]
-                            gt[c] = gt[c] * (ch_max[c] - ch_min[c]) + ch_min[c]
-                    except: pass
-                    
-                    valid_d = vD
-                    for d in range(vD - 1, -1, -1):
-                        if np.abs(gt[:, d, :, :]).sum() > 1e-6:
-                            valid_d = d + 1
-                            break
-                    pred = pred[:, :valid_d, :, :]
-                    gt = gt[:, :valid_d, :, :]
-                    
-                    vis_mesh = pv.ImageData()
-                    vis_mesh.dimensions = (vW, vH, valid_d)
-                    for i, name in enumerate(["u", "v", "w"]):
-                        vis_mesh.point_data[f"{name}_rec"] = pred[i].flatten(order='C')
-                        vis_mesh.point_data[f"{name}_gt"] = gt[i].flatten(order='C')
-                    
-                    out_path = os.path.join(args.save_dir, f"recon_epoch_{epoch}.vti")
-                    vis_mesh.save(out_path)
-                    print(f" -> Saved reconstruction to {out_path}")
+                    torch.save(save_dict, ckpt_path)
+                print(f" -> Best Checkpoint Saved.")
 
-    if is_tpu:
-        if xm.is_master_ordinal():
-            print("\nPre-training Complete.")
-    else:
-        if rank == 0:
-            print("\nPre-training Complete.")
+    if not IS_TPU and world_size > 1:
         dist.destroy_process_group()
 
-# ============================================================
-# Entry Point
-# ============================================================
 if __name__ == "__main__":
-    if IS_TPU:
-        # TPU: use xmp.spawn (no torchrun needed)
-        args = parse_args()
-        xmp.spawn(_mp_fn, args=(args,))
-    else:
-        # GPU: called by torchrun
-        main_gpu()
+    main()
