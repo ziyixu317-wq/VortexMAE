@@ -270,7 +270,7 @@ if __name__ == "__main__":
     if IS_TPU:
         # TPU: use xmp.spawn (no torchrun needed)
         args = parse_args()
-        xmp.spawn(_mp_fn, args=(args,), nprocs=8)
+        xmp.spawn(_mp_fn, args=(args,))
     else:
         # GPU: called by torchrun
         main_gpu()

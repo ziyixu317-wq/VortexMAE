@@ -201,6 +201,6 @@ def _finetune_loop(args, rank, world_size, local_rank, device, is_tpu):
 if __name__ == "__main__":
     if IS_TPU:
         args = parse_args()
-        xmp.spawn(_mp_fn, args=(args,), nprocs=8)
+        xmp.spawn(_mp_fn, args=(args,))
     else:
         main_gpu()
