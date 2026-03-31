@@ -35,12 +35,14 @@ def setup_ddp():
         local_rank = int(os.environ["LOCAL_RANK"])
         
         if IS_TPU:
+            os.environ['PJRT_DEVICE'] = 'TPU'
             # 1. Initialize XLA backend first
             if not dist.is_initialized():
+                import torch_xla.distributed.xla_backend
                 dist.init_process_group(backend="xla", init_method="env://")
-            # 2. Get device using newer API
+            # 2. Get device using local_rank indexing
             import torch_xla
-            device = torch_xla.device()
+            device = torch_xla.device(local_rank)
         else:
             if not dist.is_initialized():
                 dist.init_process_group(backend="nccl", init_method="env://")
@@ -52,6 +54,7 @@ def setup_ddp():
         world_size = 1
         local_rank = 0
         if IS_TPU:
+            os.environ['PJRT_DEVICE'] = 'TPU'
             import torch_xla
             device = torch_xla.device()
             if not dist.is_initialized():
