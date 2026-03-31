@@ -11,25 +11,20 @@ class VortexMAE(nn.Module):
     Architecture: Swin Transformer Encoder + U-Net Transposed Conv Decoder.
     """
     def __init__(self, patch_size=(4, 4, 4), in_chans=3, out_chans=1,
-                 embed_dim=64, depths=[2, 2, 18, 2], num_heads=[4, 8, 16, 32],
-                 window_size=(4, 4, 4), mask_ratio=0.25, mode='pretrain',
-                 use_checkpoint=False):
+                 embed_dim=48, depths=[2, 2, 18, 2], num_heads=[3, 6, 12, 24], 
+                 window_size=(4, 4, 4), mask_ratio=0.25, mode='pretrain'):
         super().__init__()
         self.patch_size = patch_size
         self.in_chans = in_chans
         self.out_chans = out_chans
         self.mask_ratio = mask_ratio
         self.mode = mode
-        self.use_checkpoint = use_checkpoint
         
         # 1. Swin-ViT Encoder
         self.encoder = SwinTransformer3D(
             patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, 
             depths=depths, num_heads=num_heads, window_size=window_size
         )
-        if self.use_checkpoint:
-            for layer in self.encoder.layers:
-                layer.use_checkpoint = True
         
         # 2. Mask Token (only used in pre-training)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, 1, embed_dim))
@@ -54,11 +49,16 @@ class VortexMAE(nn.Module):
             nn.Conv3d(d1, embed_dim, kernel_size=3, padding=1)
         )
         
-        # Final output head (Dynamic channels based on mode to avoid DDP unused parameter error)
-        head_chans = in_chans if mode == 'pretrain' else out_chans
-        self.up_final = nn.Sequential(
+        # Final reconstruction layer for pre-training (3-channel velocity)
+        self.up_final_rec = nn.Sequential(
             nn.Upsample(scale_factor=patch_size, mode='trilinear', align_corners=False),
-            nn.Conv3d(embed_dim, head_chans, kernel_size=3, padding=1)
+            nn.Conv3d(embed_dim, in_chans, kernel_size=3, padding=1)
+        )
+        
+        # Final segmentation head for fine-tuning (out_chans-channel mask, usually 1)
+        self.up_final_seg = nn.Sequential(
+            nn.Upsample(scale_factor=patch_size, mode='trilinear', align_corners=False),
+            nn.Conv3d(embed_dim, out_chans, kernel_size=3, padding=1)
         )
 
     def forward(self, x):
@@ -87,52 +87,40 @@ class VortexMAE(nn.Module):
         outs = []
         curr_x = x_input
         for layer in self.encoder.layers:
-            # Note: BasicLayer3D now handles its own internal block-level checkpointing
             x_layer_out, curr_x = layer(curr_x)
             outs.append(x_layer_out)
         
         # --- 3. U-Net Decoder (Expansive Path) ---
-        # Helper for decoder checkpointing
-        def upsample_add(z, skip, up_op):
-            z = up_op(z)
-            sh = skip.shape
-            # Handle possible rounding differences in upsampling
-            z = z[:, :, :sh[1], :sh[2], :sh[3]]
-            return z + skip.permute(0, 4, 1, 2, 3)
-
         # Stage 3 -> 2
         z = outs[3].permute(0, 4, 1, 2, 3) 
-        if self.use_checkpoint:
-            from torch.utils.checkpoint import checkpoint
-            # Workaround for torch.utils.checkpoint not finding torch.xla in some envs
-            if not hasattr(torch, 'xla'):
-                try: import torch_xla; torch.xla = torch_xla
-                except ImportError: pass
-            z = checkpoint(upsample_add, z, outs[2], self.up_stage3, use_reentrant=False)
-        else:
-            z = upsample_add(z, outs[2], self.up_stage3)
+        z = self.up_stage3(z)
+        sh2 = outs[2].shape
+        z = z[:, :, :sh2[1], :sh2[2], :sh2[3]] 
+        z = z + outs[2].permute(0, 4, 1, 2, 3)
         
         # Stage 2 -> 1
-        if self.use_checkpoint:
-            z = checkpoint(upsample_add, z, outs[1], self.up_stage2, use_reentrant=False)
-        else:
-            z = upsample_add(z, outs[1], self.up_stage2)
+        z = self.up_stage2(z)
+        sh1 = outs[1].shape
+        z = z[:, :, :sh1[1], :sh1[2], :sh1[3]]
+        z = z + outs[1].permute(0, 4, 1, 2, 3)
         
         # Stage 1 -> 0
-        if self.use_checkpoint:
-            z = checkpoint(upsample_add, z, outs[0], self.up_stage1, use_reentrant=False)
-        else:
-            z = upsample_add(z, outs[0], self.up_stage1)
+        z = self.up_stage1(z)
+        sh0 = outs[0].shape
+        z = z[:, :, :sh0[1], :sh0[2], :sh0[3]]
+        z = z + outs[0].permute(0, 4, 1, 2, 3)
         
-        # Final layer
-        out = self.up_final(z)
-        out = out[:, :, :D, :H, :W] # Crop to exact input size
-        
+        # Final layer based on mode
         if self.mode == 'pretrain':
+            out = self.up_final_rec(z)
+            # Crop to exact input size (Upsample may overshoot)
+            out = out[:, :, :D, :H, :W]
             mask_pixel = F.interpolate(mask.permute(0, 4, 1, 2, 3), 
                                        size=(D, H, W), mode='nearest')
             return out, mask_pixel
         else:
+            out = self.up_final_seg(z)
+            out = out[:, :, :D, :H, :W]
             # Return raw logits for more stable BCEWithLogitsLoss
             return out
 

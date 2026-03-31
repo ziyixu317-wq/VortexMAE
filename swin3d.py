@@ -197,12 +197,10 @@ class PatchMerging3D(nn.Module):
 
 class BasicLayer3D(nn.Module):
     def __init__(self, dim, depth, num_heads, window_size, mlp_ratio=4., qkv_bias=True, qk_scale=None,
-                 drop=0., attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, downsample=None,
-                 use_checkpoint=False):
+                 drop=0., attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, downsample=None):
         super().__init__()
         self.dim = dim
         self.depth = depth
-        self.use_checkpoint = use_checkpoint
         self.blocks = nn.ModuleList([
             SwinTransformerBlock3D(
                 dim=dim, num_heads=num_heads, window_size=window_size,
@@ -215,11 +213,7 @@ class BasicLayer3D(nn.Module):
 
     def forward(self, x):
         for blk in self.blocks:
-            if self.use_checkpoint:
-                from torch.utils.checkpoint import checkpoint
-                x = checkpoint(blk, x, use_reentrant=False)
-            else:
-                x = blk(x)
+            x = blk(x)
         if self.downsample is not None:
             x_down = self.downsample(x)
             return x, x_down
