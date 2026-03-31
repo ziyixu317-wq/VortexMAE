@@ -36,11 +36,12 @@ if IS_TPU:
 def parse_args():
     parser = argparse.ArgumentParser(description="VortexMAE Pre-training (GPU/TPU)")
     parser.add_argument("--data_dir", type=str, required=True, help="Directory containing .vti files")
-    parser.add_argument("--batch_size", type=int, default=16, help="TOTAL batch size")
+    parser.add_argument("--batch_size", type=int, default=8, help="TOTAL batch size")
     parser.add_argument("--epochs", type=int, default=2000, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--save_dir", type=str, default="./checkpoints_pretrain", help="Save directory")
     parser.add_argument("--mask_ratio", type=float, default=0.25, help="MAE mask ratio")
+    parser.add_argument("--use_checkpoint", action="store_true", help="Use gradient checkpointing")
     return parser.parse_args()
 
 def setup_gpu_ddp():
@@ -107,8 +108,12 @@ def main():
         mask_ratio=args.mask_ratio,
         embed_dim=48,
         depths=[2, 2, 18, 2],
-        num_heads=[3, 6, 12, 24]
+        num_heads=[3, 6, 12, 24],
+        use_checkpoint=args.use_checkpoint if not IS_TPU else True # Auto-enable on TPU
     ).to(device)
+    
+    if IS_TPU:
+        model = model.to(torch.bfloat16)
     
     if not IS_TPU and world_size > 1:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -136,13 +141,18 @@ def main():
                 xs.mark_sharding(batch, mesh, ('data', None, None, None, None))
             
             optimizer.zero_grad()
-            x_rec, mask = model(batch)
-            loss = vortex_mae_pretrain_loss(x_rec, batch, mask)
-            loss.backward()
             
+            # Use autocast for TPU to save memory (HBM)
             if IS_TPU:
+                with torch.autocast(device_type='xla', dtype=torch.bfloat16):
+                    x_rec, mask = model(batch)
+                    loss = vortex_mae_pretrain_loss(x_rec, batch, mask)
+                loss.backward()
                 xm.optimizer_step(optimizer)
             else:
+                x_rec, mask = model(batch)
+                loss = vortex_mae_pretrain_loss(x_rec, batch, mask)
+                loss.backward()
                 optimizer.step()
                 
             train_loss_val += loss.item()

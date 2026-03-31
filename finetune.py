@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--save_dir", type=str, default="./checkpoints_finetune", help="Save directory")
     parser.add_argument("--pos_weight", type=float, default=2.0, help="Positive class weight")
+    parser.add_argument("--use_checkpoint", action="store_true", help="Use gradient checkpointing")
     return parser.parse_args()
 
 def setup_gpu_ddp():
@@ -93,7 +94,11 @@ def main():
     in_chans, D, H, W = train_dataset[0].shape
     
     # 4. Model Initialization
-    model = VortexMAE(in_chans=in_chans, out_chans=1, mode='segmentation').to(device)
+    model = VortexMAE(in_chans=in_chans, out_chans=1, mode='segmentation', 
+                      use_checkpoint=args.use_checkpoint if not IS_TPU else True).to(device)
+    
+    if IS_TPU:
+        model = model.to(torch.bfloat16)
     
     # Load pre-trained weights
     if rank == 0:
@@ -140,13 +145,17 @@ def main():
                 gt_ivd = calculate_ivd(batch)
                 gt_mask = (gt_ivd > 0).float().unsqueeze(1)
             
-            pred_logits = model(batch)
-            loss = vortex_mae_paper_loss(pred_logits, gt_mask, pos_weight=args.pos_weight)
-            loss.backward()
-            
             if IS_TPU:
+                with torch.autocast(device_type='xla', dtype=torch.bfloat16):
+                    pred_logits = model(batch)
+                    # Cast gt_mask to bfloat16 for TPU compatibility
+                    loss = vortex_mae_paper_loss(pred_logits, gt_mask.to(torch.bfloat16), pos_weight=args.pos_weight)
+                loss.backward()
                 xm.optimizer_step(optimizer)
             else:
+                pred_logits = model(batch)
+                loss = vortex_mae_paper_loss(pred_logits, gt_mask, pos_weight=args.pos_weight)
+                loss.backward()
                 optimizer.step()
             
             epoch_loss += loss.item()

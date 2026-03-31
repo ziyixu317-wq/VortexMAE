@@ -11,14 +11,15 @@ class VortexMAE(nn.Module):
     Architecture: Swin Transformer Encoder + U-Net Transposed Conv Decoder.
     """
     def __init__(self, patch_size=(4, 4, 4), in_chans=3, out_chans=1,
-                 embed_dim=48, depths=[2, 2, 18, 2], num_heads=[3, 6, 12, 24], 
-                 window_size=(4, 4, 4), mask_ratio=0.25, mode='pretrain'):
+                 window_size=(4, 4, 4), mask_ratio=0.25, mode='pretrain',
+                 use_checkpoint=False):
         super().__init__()
         self.patch_size = patch_size
         self.in_chans = in_chans
         self.out_chans = out_chans
         self.mask_ratio = mask_ratio
         self.mode = mode
+        self.use_checkpoint = use_checkpoint
         
         # 1. Swin-ViT Encoder
         self.encoder = SwinTransformer3D(
@@ -87,7 +88,12 @@ class VortexMAE(nn.Module):
         outs = []
         curr_x = x_input
         for layer in self.encoder.layers:
-            x_layer_out, curr_x = layer(curr_x)
+            if self.use_checkpoint:
+                from torch.utils.checkpoint import checkpoint
+                # Use checkpoint for each Swin stage to minimize memory
+                x_layer_out, curr_x = checkpoint(layer, curr_x, use_reentrant=False)
+            else:
+                x_layer_out, curr_x = layer(curr_x)
             outs.append(x_layer_out)
         
         # --- 3. U-Net Decoder (Expansive Path) ---
