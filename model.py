@@ -91,6 +91,13 @@ class VortexMAE(nn.Module):
         for layer in self.encoder.layers:
             if self.use_checkpoint:
                 from torch.utils.checkpoint import checkpoint
+                # Workaround for torch.utils.checkpoint not finding torch.xla in some envs
+                if not hasattr(torch, 'xla'):
+                    try:
+                        import torch_xla
+                        torch.xla = torch_xla
+                    except ImportError:
+                        pass
                 # Use checkpoint for each Swin stage to minimize memory
                 x_layer_out, curr_x = checkpoint(layer, curr_x, use_reentrant=False)
             else:
