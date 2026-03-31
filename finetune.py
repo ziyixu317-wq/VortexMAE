@@ -15,14 +15,15 @@ from dataset import VortexMAEDataset
 from model import VortexMAE
 from vortex_utils import vortex_mae_paper_loss, calculate_iou, calculate_ivd
 
-# TPU Support
+# TPU Support Detection
+IS_TPU = False
 try:
+    import torch_xla
     import torch_xla.core.xla_model as xm
-    import torch_xla.distributed.xla_backend
-    import torch_xla.distributed.parallel_loader as pl
-    IS_TPU = True
+    if xm.get_xla_supported_devices('TPU'):
+        IS_TPU = True
 except ImportError:
-    IS_TPU = False
+    pass
 
 def setup_ddp():
     """Initialize DDP environment for torchrun (handles GPU/TPU)."""
@@ -31,13 +32,16 @@ def setup_ddp():
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ["LOCAL_RANK"])
         
-        backend = "xla" if IS_TPU else "nccl"
-        if not dist.is_initialized():
-            dist.init_process_group(backend=backend, init_method="env://")
-        
         if IS_TPU:
-            device = xm.xla_device()
+            # 1. Initialize XLA backend first
+            if not dist.is_initialized():
+                dist.init_process_group(backend="xla", init_method="env://")
+            # 2. Get device using newer API
+            import torch_xla
+            device = torch_xla.device()
         else:
+            if not dist.is_initialized():
+                dist.init_process_group(backend="nccl", init_method="env://")
             torch.cuda.set_device(local_rank)
             device = torch.device(f"cuda:{local_rank}")
     else:
@@ -46,7 +50,8 @@ def setup_ddp():
         world_size = 1
         local_rank = 0
         if IS_TPU:
-            device = xm.xla_device()
+            import torch_xla
+            device = torch_xla.device()
             if not dist.is_initialized():
                  dist.init_process_group(backend="xla", init_method="tcp://127.0.0.1:23457", world_size=1, rank=0)
         elif torch.cuda.is_available():
