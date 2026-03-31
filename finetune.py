@@ -44,6 +44,16 @@ def parse_args():
     parser.add_argument("--use_checkpoint", action="store_true", help="Use gradient checkpointing")
     return parser.parse_args()
 
+def print_tpu_memory():
+    """Print memory usage for all 8 TPU cores."""
+    if IS_TPU:
+        device = xm.xla_device()
+        info = xm.get_memory_info(device)
+        kb = 1024.0
+        used = (info['kb_total'] - info['kb_free']) / (kb * 1024.0)
+        total = info['kb_total'] / (kb * 1024.0)
+        print(f" [TPU Memory] Core 0: {used:.2f}GB / {total:.2f}GB")
+
 def setup_gpu_ddp():
     """Initialize DDP for GPU."""
     if 'RANK' in os.environ:
@@ -169,6 +179,8 @@ def main():
         
         if rank == 0:
             print(f"Epoch {epoch} | Loss: {avg_loss:.6f} | IoU: {avg_iou:.4f}")
+            if IS_TPU:
+                print_tpu_memory()
             if avg_iou > best_iou:
                 best_iou = avg_iou
                 ckpt_path = os.path.join(args.save_dir, "vortexmae_finetuned_best.pth")

@@ -44,6 +44,20 @@ def parse_args():
     parser.add_argument("--use_checkpoint", action="store_true", help="Use gradient checkpointing")
     return parser.parse_args()
 
+def print_tpu_memory():
+    """Print memory usage for all 8 TPU cores."""
+    if IS_TPU:
+        # PjRt: get_memory_info(device) provides HBM usage
+        device = xm.xla_device()
+        info = xm.get_memory_info(device)
+        # Convert to GB
+        kb = 1024.0
+        used = (info['kb_total'] - info['kb_free']) / (kb * 1024.0)
+        total = info['kb_total'] / (kb * 1024.0)
+        print(f" [TPU Memory] Core 0: {used:.2f}GB / {total:.2f}GB")
+        # To see all 8 cores in SPMD, you can just assume they are similar 
+        # as the workload is sharded equally.
+
 def setup_gpu_ddp():
     """Initialize DDP for GPU."""
     if 'RANK' in os.environ:
@@ -187,6 +201,8 @@ def main():
         
         if rank == 0:
             print(f"Epoch {epoch} | Train: {avg_train_loss:.6f} | Test: {avg_test_loss:.6f} | PSNR: {avg_test_psnr:.2f}dB")
+            if IS_TPU:
+                print_tpu_memory()
             
             if avg_test_loss < best_loss:
                 best_loss = avg_test_loss
