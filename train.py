@@ -26,6 +26,7 @@ if IS_TPU:
     try:
         import torch_xla
         import torch_xla.core.xla_model as xm
+        import torch_xla.distributed.xla_backend # Register XLA backend at top level
     except ImportError:
         IS_TPU = False
 
@@ -37,15 +38,17 @@ def setup_ddp():
         local_rank = int(os.environ["LOCAL_RANK"])
         
         if IS_TPU:
-            # Set runtime environment
+            # Mandatory PjRt env vars for torchrun parity
             os.environ['PJRT_DEVICE'] = 'TPU'
-            # 1. Initialize XLA backend first
+            os.environ['PJRT_LOCAL_PROCESS_RANK'] = str(local_rank)
+            os.environ['PJRT_LOCAL_DEVICE_COUNT'] = '8'
+            
+            # 1. Initialize XLA backend
             if not dist.is_initialized():
-                import torch_xla.distributed.xla_backend
                 dist.init_process_group(backend="xla", init_method="env://")
-            # 2. Get device using local_rank core indexing
-            import torch_xla
-            device = torch_xla.device(local_rank)
+            # 2. Get device
+            import torch_xla.core.xla_model as xm
+            device = xm.xla_device()
         else:
             if not dist.is_initialized():
                 dist.init_process_group(backend="nccl", init_method="env://")
@@ -58,8 +61,8 @@ def setup_ddp():
         local_rank = 0
         if IS_TPU:
             os.environ['PJRT_DEVICE'] = 'TPU'
-            import torch_xla
-            device = torch_xla.device()
+            import torch_xla.core.xla_model as xm
+            device = xm.xla_device()
             if not dist.is_initialized():
                  dist.init_process_group(backend="xla", init_method="tcp://127.0.0.1:23456", world_size=1, rank=0)
         elif torch.cuda.is_available():
