@@ -17,20 +17,50 @@ from dataset import VortexMAEDataset
 from model import VortexMAE, vortex_mae_pretrain_loss
 from vortex_utils import calculate_psnr
 
+# TPU Support
+try:
+    import torch_xla.core.xla_model as xm
+    import torch_xla.distributed.xla_backend
+    import torch_xla.distributed.parallel_loader as pl
+    IS_TPU = True
+except ImportError:
+    IS_TPU = False
+
 def setup_ddp():
-    """Initialize DDP environment for torchrun."""
+    """Initialize DDP environment for torchrun (handles GPU/TPU)."""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ["LOCAL_RANK"])
-        dist.init_process_group(backend="nccl", init_method="env://")
-        torch.cuda.set_device(local_rank)
+        
+        backend = "xla" if IS_TPU else "nccl"
+        if not dist.is_initialized():
+            dist.init_process_group(backend=backend, init_method="env://")
+        
+        if IS_TPU:
+            device = xm.xla_device()
+        else:
+            torch.cuda.set_device(local_rank)
+            device = torch.device(f"cuda:{local_rank}")
     else:
+        # Single device fallback
         rank = 0
         world_size = 1
         local_rank = 0
-        dist.init_process_group(backend="nccl", init_method="tcp://127.0.0.1:23456", world_size=1, rank=0)
-    return rank, world_size, local_rank
+        if IS_TPU:
+            device = xm.xla_device()
+            if not dist.is_initialized():
+                 dist.init_process_group(backend="xla", init_method="tcp://127.0.0.1:23456", world_size=1, rank=0)
+        elif torch.cuda.is_available():
+            device = torch.device("cuda:0")
+            if not dist.is_initialized():
+                dist.init_process_group(backend="nccl", init_method="tcp://127.0.0.1:23456", world_size=1, rank=0)
+        else:
+            device = torch.device("cpu")
+            if not dist.is_initialized():
+                dist.init_process_group(backend="gloo", init_method="tcp://127.0.0.1:23456", world_size=1, rank=0)
+                
+    return rank, world_size, local_rank, device
 
 def main():
     parser = argparse.ArgumentParser(description="VortexMAE Pre-training (DDP T4*2 Optimized)")
@@ -43,8 +73,7 @@ def main():
     args = parser.parse_args()
     
     # 1. DDP Setup
-    rank, world_size, local_rank = setup_ddp()
-    device = torch.device(f"cuda:{local_rank}")
+    rank, world_size, local_rank, device = setup_ddp()
     
     if rank == 0:
         os.makedirs(args.save_dir, exist_ok=True)
@@ -77,9 +106,13 @@ def main():
         num_heads=[3, 6, 12, 24]
     ).to(device)
     
-    # SyncBatchNorm is critical for DDP with small per-GPU batches
-    model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    # SyncBatchNorm
+    if not IS_TPU:
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    else:
+        # Wrap for TPU DDP if using torch.distributed backend
+        model = DDP(model, gradient_as_bucket_view=True)
     
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05, betas=(0.9, 0.99))
     scheduler = StepLR(optimizer, step_size=100, gamma=0.8)
@@ -93,7 +126,11 @@ def main():
         train_loss = torch.tensor(0.0).to(device)
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs} [Train]", disable=(rank != 0))
-        for batch in pbar:
+        
+        # TPU Parallel Loader
+        effective_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device) if IS_TPU else train_loader
+
+        for batch in effective_loader:
             batch = batch.to(device)
             optimizer.zero_grad()
             
@@ -101,7 +138,12 @@ def main():
             loss = vortex_mae_pretrain_loss(x_rec, batch, mask)
             
             loss.backward()
-            optimizer.step()
+            
+            if IS_TPU:
+                xm.optimizer_step(optimizer)
+            else:
+                optimizer.step()
+                
             train_loss += loss.detach()
             
         # Synchronize loss across all GPUs
@@ -112,8 +154,11 @@ def main():
         model.eval()
         test_loss = torch.tensor(0.0).to(device)
         test_psnr = torch.tensor(0.0).to(device)
+        
+        effective_test_loader = pl.ParallelLoader(test_loader, [device]).per_device_loader(device) if IS_TPU else test_loader
+
         with torch.no_grad():
-            for batch in test_loader:
+            for batch in effective_test_loader:
                 batch = batch.to(device)
                 x_rec, mask = model(batch)
                 loss = vortex_mae_pretrain_loss(x_rec, batch, mask)

@@ -15,26 +15,50 @@ from dataset import VortexMAEDataset
 from model import VortexMAE
 from vortex_utils import vortex_mae_paper_loss, calculate_iou, calculate_ivd
 
+# TPU Support
+try:
+    import torch_xla.core.xla_model as xm
+    import torch_xla.distributed.xla_backend
+    import torch_xla.distributed.parallel_loader as pl
+    IS_TPU = True
+except ImportError:
+    IS_TPU = False
+
 def setup_ddp():
-    """Initialize DDP environment for torchrun."""
+    """Initialize DDP environment for torchrun (handles GPU/TPU)."""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ["LOCAL_RANK"])
-        dist.init_process_group(backend="nccl", init_method="env://")
-        torch.cuda.set_device(local_rank)
+        
+        backend = "xla" if IS_TPU else "nccl"
+        if not dist.is_initialized():
+            dist.init_process_group(backend=backend, init_method="env://")
+        
+        if IS_TPU:
+            device = xm.xla_device()
+        else:
+            torch.cuda.set_device(local_rank)
+            device = torch.device(f"cuda:{local_rank}")
     else:
-        # Fallback for single-GPU testing without torchrun
+        # Single device fallback
         rank = 0
         world_size = 1
         local_rank = 0
-        if torch.cuda.is_available():
-            dist.init_process_group(backend="nccl", init_method="tcp://127.0.0.1:23457", world_size=1, rank=0)
-            torch.cuda.set_device(local_rank)
+        if IS_TPU:
+            device = xm.xla_device()
+            if not dist.is_initialized():
+                 dist.init_process_group(backend="xla", init_method="tcp://127.0.0.1:23457", world_size=1, rank=0)
+        elif torch.cuda.is_available():
+            device = torch.device("cuda:0")
+            if not dist.is_initialized():
+                dist.init_process_group(backend="nccl", init_method="tcp://127.0.0.1:23457", world_size=1, rank=0)
         else:
-            # For CPU-only, DDP is not typically used, but for completeness
-            dist.init_process_group(backend="gloo", init_method="tcp://127.0.0.1:23457", world_size=1, rank=0)
-    return rank, world_size, local_rank
+            device = torch.device("cpu")
+            if not dist.is_initialized():
+                dist.init_process_group(backend="gloo", init_method="tcp://127.0.0.1:23457", world_size=1, rank=0)
+                
+    return rank, world_size, local_rank, device
 
 def main():
     parser = argparse.ArgumentParser(description="VortexMAE Fine-tuning (DDP T4*2 Optimized)")
@@ -49,8 +73,7 @@ def main():
     args = parser.parse_args()
     
     # 1. DDP Setup
-    rank, world_size, local_rank = setup_ddp()
-    device = torch.device(f"cuda:{local_rank}")
+    rank, world_size, local_rank, device = setup_ddp()
     
     if rank == 0:
         os.makedirs(args.save_dir, exist_ok=True)
@@ -90,8 +113,11 @@ def main():
     model = model.to(device)
     
     # SyncBatchNorm and DDP
-    model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    if not IS_TPU:
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    else:
+        model = DDP(model, gradient_as_bucket_view=True)
     
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05, betas=(0.9, 0.99))
     scheduler = StepLR(optimizer, step_size=100, gamma=0.8)
@@ -115,11 +141,16 @@ def main():
                 gt_ivd = calculate_ivd(batch)
                 gt_mask = (gt_ivd > 0).float().unsqueeze(1)
             
+            # Forward
             pred_logits = model(batch)
             loss = vortex_mae_paper_loss(pred_logits, gt_mask, pos_weight=args.pos_weight)
             
             loss.backward()
-            optimizer.step()
+            
+            if IS_TPU:
+                xm.optimizer_step(optimizer)
+            else:
+                optimizer.step()
             
             epoch_loss += loss.detach()
             pred_prob = torch.sigmoid(pred_logits)
