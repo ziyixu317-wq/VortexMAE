@@ -15,15 +15,17 @@ from dataset import VortexMAEDataset
 from model import VortexMAE
 from vortex_utils import vortex_mae_paper_loss, calculate_iou, calculate_ivd
 
-# TPU Support Detection
-IS_TPU = False
-try:
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-    if xm.get_xla_supported_devices('TPU'):
-        IS_TPU = True
-except ImportError:
-    pass
+# TPU Support Detection (Environment-based)
+IS_TPU = (os.environ.get('TPU_NAME') is not None or 
+          os.environ.get('TPU_ACCELERATOR_TYPE') is not None or
+          os.environ.get('KAGGLE_TPU_VERSION') is not None)
+
+if IS_TPU:
+    try:
+        import torch_xla
+        import torch_xla.core.xla_model as xm
+    except ImportError:
+        IS_TPU = False
 
 def setup_ddp():
     """Initialize DDP environment for torchrun (handles GPU/TPU)."""
@@ -174,9 +176,10 @@ def main():
             print(f"Epoch {epoch} | Loss: {avg_loss:.6f} | Mean IoU: {avg_iou:.4f}")
             if avg_iou > best_iou:
                 best_iou = avg_iou
+                checkpoint_model = model.module if hasattr(model, 'module') else model
                 torch.save({
                     'epoch': epoch,
-                    'model_state_dict': model.module.state_dict(), # Save unwrapped model state_dict
+                    'model_state_dict': checkpoint_model.state_dict(),
                     'iou': best_iou
                 }, os.path.join(args.save_dir, "vortexmae_finetuned_best.pth"))
                 print(f" -> Saved best fine-tuned checkpoint (IoU: {best_iou:.4f})")

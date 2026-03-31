@@ -17,17 +17,17 @@ from dataset import VortexMAEDataset
 from model import VortexMAE, vortex_mae_pretrain_loss
 from vortex_utils import calculate_psnr
 
-# TPU Support Detection
-IS_TPU = False
-try:
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-    # Check if actually on TPU (PjRt runtime usually has TPU_NAME or similar)
-    # Or just check if torch_xla can see devices
-    if xm.get_xla_supported_devices('TPU'):
-        IS_TPU = True
-except ImportError:
-    pass
+# TPU Support Detection (Environment-based to avoid top-level hardware race conditions)
+IS_TPU = (os.environ.get('TPU_NAME') is not None or 
+          os.environ.get('TPU_ACCELERATOR_TYPE') is not None or
+          os.environ.get('KAGGLE_TPU_VERSION') is not None)
+
+if IS_TPU:
+    try:
+        import torch_xla
+        import torch_xla.core.xla_model as xm
+    except ImportError:
+        IS_TPU = False
 
 def setup_ddp():
     """Initialize DDP environment for torchrun (handles GPU/TPU)."""
@@ -196,9 +196,10 @@ def main():
                 best_loss = avg_test_loss
                 ckpt_path = os.path.join(args.save_dir, "vortexmae_best.pth")
                 # Save unwrapped model
+                checkpoint_model = model.module if hasattr(model, 'module') else model
                 torch.save({
                     'epoch': epoch,
-                    'model_state_dict': model.module.state_dict(),
+                    'model_state_dict': checkpoint_model.state_dict(),
                     'loss': best_loss
                 }, ckpt_path)
                 print(f" -> Saved best checkpoint: {ckpt_path}")
